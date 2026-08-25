@@ -1,0 +1,74 @@
+<mujoco model="so101_linnmon_table_scene">
+  <!-- M3: SO-101 + LINNMON/ADILS table, geometric-correctness-only combined
+       scene. No cube, no cameras beyond one debug view, no keyboard control
+       yet (that's M5+).
+
+       Robot base mounting convention (placeholder, NOT yet hardware-
+       calibrated -- see docs/project_status_and_next_steps.md and the M3
+       plan's own note that base position is a calibration parameter to be
+       measured later, distinct from joint home pose):
+
+       so101.xml's "base" body is hardcoded at world pos="0 0 0" inside its
+       own worldbody, and every existing working scene in this repo
+       (so101_assets/scene.xml, scene_box.xml, so101_pickplace_scene.xml)
+       respects that by building the supporting floor/table surface flush
+       with world Z=0 -- none of them reposition the robot body itself.
+       This scene follows the same convention: so101.xml is included
+       completely unmodified (preserving the validated model byte-for-byte),
+       and the LINNMON table is shifted down by 0.74m from its real-world
+       table_scene.xml convention (floor Z=0, tabletop top Z=0.74) so that
+       the tabletop TOP surface sits at Z=0, exactly where the robot base
+       already is. Floor is therefore at Z=-0.74 in this scene's local
+       frame. When the real robot base X/Y/Z/yaw is measured (M6), replace
+       this placeholder with the measured transform. -->
+
+  <compiler angle="radian" autolimits="true" meshdir="../../../so101_assets/assets"/>
+
+  <include file="../../../so101_assets/so101.xml"/>
+
+  <visual>
+    <headlight diffuse="0.3 0.3 0.3" ambient="0.4 0.4 0.4" specular="0.1 0.1 0.1"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <material name="table_white_mat" rgba="0.92 0.92 0.90 1" specular="0.15" shininess="0.2" reflectance="0.05"/>
+    <material name="floor_mat" rgba="0.55 0.55 0.55 1" specular="0.05" shininess="0.0"/>
+  </asset>
+
+  <default>
+    <default class="table_collision">
+      <geom contype="1" conaffinity="1" condim="3" friction="0.6 0.01 0.001" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="top_light" pos="0 0 1.8" dir="0 0 -1" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1" castshadow="true"/>
+
+    <camera name="table_view" pos="0.9 -0.9 0.6" xyaxes="0.707 0.707 0 -0.4 0.4 0.82"/>
+
+    <!-- Floor: static plane, shifted to Z = -0.74 so the tabletop top
+         surface (see below) lands at Z = 0, flush with the robot base. -->
+    <geom name="floor" type="plane" size="2.5 2.5 0.05" pos="0 0 -0.74" material="floor_mat" class="table_collision"/>
+
+    <!-- IKEA LINNMON / ADILS table, static, copied from table_scene.xml
+         and shifted down by 0.74m (see mounting-convention note above).
+         Tabletop top surface at Z = 0 (was Z=0.74 in table_scene.xml's
+         real-world frame; -0.015 center - 0.71 legs here). -->
+    <body name="table" pos="0 0 -0.74">
+
+      <geom name="tabletop" type="box" size="0.50 0.30 0.015" pos="0 0 0.725"
+            material="table_white_mat" class="table_collision"/>
+
+      <geom name="table_leg_front_left" type="cylinder" size="0.025 0.355" pos="0.42 0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_front_right" type="cylinder" size="0.025 0.355" pos="0.42 -0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_back_left" type="cylinder" size="0.025 0.355" pos="-0.42 0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_back_right" type="cylinder" size="0.025 0.355" pos="-0.42 -0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+
+    </body>
+  </worldbody>
+</mujoco>

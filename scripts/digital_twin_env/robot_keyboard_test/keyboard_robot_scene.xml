@@ -1,0 +1,61 @@
+<mujoco model="so101_linnmon_table_keyboard_scene">
+  <!-- M5 (keyboard -> MuJoCo): identical scene to
+       ../robot_on_table_test/robot_on_table_scene.xml, copied here
+       unmodified so this test directory is isolated (per instruction: do
+       not touch the robot XML or table geometry). See that file for the
+       full mounting-convention writeup; unchanged here.
+
+       so101.xml is included completely unmodified. The LINNMON table is
+       shifted down by 0.74m so its tabletop TOP surface sits at Z=0,
+       flush with the robot base (also at Z=0). Placeholder mounting
+       convention, not yet hardware-calibrated (real X/Y/Z/yaw measurement
+       is M6). -->
+
+  <compiler angle="radian" autolimits="true" meshdir="../../../so101_assets/assets"/>
+
+  <include file="../../../so101_assets/so101.xml"/>
+
+  <visual>
+    <headlight diffuse="0.3 0.3 0.3" ambient="0.4 0.4 0.4" specular="0.1 0.1 0.1"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <material name="table_white_mat" rgba="0.92 0.92 0.90 1" specular="0.15" shininess="0.2" reflectance="0.05"/>
+    <material name="floor_mat" rgba="0.55 0.55 0.55 1" specular="0.05" shininess="0.0"/>
+  </asset>
+
+  <default>
+    <default class="table_collision">
+      <geom contype="1" conaffinity="1" condim="3" friction="0.6 0.01 0.001" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="top_light" pos="0 0 1.8" dir="0 0 -1" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1" castshadow="true"/>
+
+    <camera name="table_view" pos="0.9 -0.9 0.6" xyaxes="0.707 0.707 0 -0.4 0.4 0.82"/>
+
+    <!-- Floor: static plane, shifted to Z = -0.74 so the tabletop top
+         surface (see below) lands at Z = 0, flush with the robot base. -->
+    <geom name="floor" type="plane" size="2.5 2.5 0.05" pos="0 0 -0.74" material="floor_mat" class="table_collision"/>
+
+    <!-- IKEA LINNMON / ADILS table, static, copied unmodified from
+         ../robot_on_table_test/robot_on_table_scene.xml. -->
+    <body name="table" pos="0 0 -0.74">
+
+      <geom name="tabletop" type="box" size="0.50 0.30 0.015" pos="0 0 0.725"
+            material="table_white_mat" class="table_collision"/>
+
+      <geom name="table_leg_front_left" type="cylinder" size="0.025 0.355" pos="0.42 0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_front_right" type="cylinder" size="0.025 0.355" pos="0.42 -0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_back_left" type="cylinder" size="0.025 0.355" pos="-0.42 0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_back_right" type="cylinder" size="0.025 0.355" pos="-0.42 -0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+
+    </body>
+  </worldbody>
+</mujoco>
