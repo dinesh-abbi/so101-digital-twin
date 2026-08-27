@@ -9,8 +9,7 @@ real follower arm and its simulated twin from the same input.
 
 Developed on Linux, validated on Windows.
 
-![status](https://img.shields.io/badge/M1--M5-working-brightgreen)
-![status](https://img.shields.io/badge/M6-in%20progress-yellow)
+![status](https://img.shields.io/badge/M1--M7-working-brightgreen)
 
 ---
 
@@ -23,8 +22,10 @@ Developed on Linux, validated on Windows.
 | M3 | SO-101 mounted on the table | ✅ |
 | M4 | Joint range / axis sanity check | ✅ |
 | M5 | Keyboard → simulated joints | ✅ |
-| M6 | Keyboard → real follower arm | 🚧 |
-| M7 | Keyboard → real arm + sim simultaneously | ⬜ |
+| M6 | Keyboard → real follower arm | ✅ |
+| M7 | Keyboard → real arm + sim simultaneously | ✅ |
+| Task 1 | Real `elbow_flex` characterisation (latency, hysteresis, load) | ✅ |
+| Task 2 | Replay real trajectories in sim, fit actuator gains | ✅ |
 
 ---
 
@@ -136,20 +137,28 @@ simulation framework.
 
 ```
 so101-digital-twin/
-├── setup.sh / setup.ps1            one-command setup
+├── setup.sh / setup.ps1            M1-M5 setup (mujoco/numpy/pynput only)
+├── setup_m6.ps1                    adds LeRobot to this venv, for M6/M7
 ├── so101_assets/                   SO-101 model + 20 STL meshes (19 MB)
-│   ├── so101.xml                   never edit — every scene includes it
+│   ├── so101.xml                   fitted actuator gains (Task 2) — never
+│   │                                hand-edit; re-run tune_actuator.py
+│   ├── so101.xml.bak               pre-fit gains, kept for comparison
 │   ├── assets/                     meshes
 │   ├── PROVENANCE.md               upstream source + local modifications
 │   └── LICENSE                     Apache 2.0
 └── scripts/
     ├── validate_scenes.py          headless load-check, all scenes
+    ├── check_pose.py               read-only: current pose vs safe envelope
+    ├── goto_home.py                releases torque on exit — prefer M6 --recover
+    ├── m6_keyboard_real.py         M6 — keyboard → real arm only
+    ├── m7_mirror_sim.py            M7 — keyboard → real arm + mirrored sim
+    ├── characterization/           Task 1/2 — real joint response, sim gain fit
     └── digital_twin_env/
         ├── table_scene.xml         M1
         ├── spawn_cube_test/        M2
         ├── robot_on_table_test/    M3
         ├── robot_keyboard_test/    M5
-        └── real_sim_mapping_test/  M6 — real↔sim conversion
+        └── real_sim_mapping_test/  M6-prep — real↔sim conversion + tests
 ```
 
 ### The `scripts/` level is load-bearing
@@ -246,24 +255,115 @@ Read from the compiled model, not hardcoded:
 
 ---
 
-## Working with real hardware (M6)
+## Working with real hardware (M6 / M7)
 
-> **⚠️ Safety.** `keyboard_robot.py` uses a *global* keyboard hook — keys
-> register regardless of which window has focus. Harmless in simulation.
-> **With a real arm connected, a keystroke in any window could move real
-> servos.** Add a focus guard before connecting hardware.
+> **⚠️ Safety.** `m6_keyboard_real.py` and `m7_mirror_sim.py` gate every key
+> behind a focus check — by default keys act only while a window whose title
+> contains `VR-SO-101 - Antigravity ` is focused (override with
+> `--require-focus`). **Click directly into that terminal window before
+> pressing any control key** — a global keyboard hook can register the OS as
+> not having given it real focus even if it looks focused, and every key
+> (including `Esc`) will silently do nothing. `Ctrl+C` always works
+> regardless of focus and disconnects cleanly.
 >
 > Keep a hand on the arm's power connector. Removing power is the fastest
 > stop and needs no screen.
+>
+> **Torque drops to zero the instant either script exits or disconnects.**
+> A loaded joint sags back toward its rest position (often outside the safe
+> envelope) within seconds. This is expected, not a fault — see Recovery
+> below.
 
-M6 additionally requires [LeRobot](https://github.com/huggingface/lerobot)
-for its `SO101Follower` driver, and a calibration for *your* arm:
+M6/M7 additionally require [LeRobot](https://github.com/huggingface/lerobot)
+for the `SOFollower` driver. Install it into *this* venv (never the
+`so101-vr` project's venv) with:
+
+```powershell
+.\setup_m6.ps1
+```
+
+and a calibration for *your specific arm* (encoder zero is per-unit, set at
+assembly — a previous arm's calibration file does not transfer):
 
 ```bash
 lerobot-calibrate --robot.type=so101_follower --robot.port=<PORT> --robot.id=<NAME>
 ```
 
-Ports are `COM*` on Windows, `/dev/ttyACM*` on Linux.
+Ports are `COM*` on Windows, `/dev/ttyACM*` on Linux. During calibration,
+sweep **every** joint fully to both physical extremes — including squeezing
+the gripper fully shut and opening it fully wide. A joint whose sweep didn't
+reach a true extreme will read a wrong percentage at that end for the rest
+of the session (this happened with the gripper and needed a recalibration
+to fix).
+
+### M6 — keyboard → real arm only
+
+```bash
+python scripts/m6_keyboard_real.py --joints elbow_flex        # start with one joint
+python scripts/m6_keyboard_real.py --joints all                # once confident
+python scripts/m6_keyboard_real.py --joints all --recover      # fold out-of-range joints in first, torque never released
+```
+
+Controls: `Q/A` shoulder_pan · `W/S` shoulder_lift · `E/D` or `Up/Down`
+elbow_flex · `R/F` wrist_flex · `T/G` wrist_roll · `Y/H` gripper · `Space`
+return to start pose · `Esc` quit.
+
+Four safety layers, all always on: the focus gate, LeRobot's
+`max_relative_target` per-command clamp, a `±SAFE_LIMIT` (50 units) envelope
+well inside the calibrated range, and one joint live at a time by default.
+
+**`--recover`** walks every out-of-range joint back into the envelope
+without ever releasing torque — use this instead of `goto_home.py`, which
+releases torque on exit and lets a loaded joint sag straight back to its
+hard stop.
+
+**`--debug-joint <name>`** logs every control tick (target before/after the
+leash clamp, measured position, whether the clamp fired) for one joint to
+`debug_<name>.csv` — useful if a joint seems unresponsive and you need to
+see whether the target is moving or the arm is.
+
+### M7 — keyboard → real arm + mirrored sim, together
+
+The sim mirrors the real arm's **measured** position, not the keyboard
+target — so any gap you see between them is genuine tracking error (the
+joint lag, backlash, and gravity droop Task 1/2 characterised), not hidden
+by the display.
+
+```bash
+# step 1: prove the wiring with no hardware
+python scripts/m7_mirror_sim.py --source sim --joints all
+
+# step 2: the real thing
+python scripts/m7_mirror_sim.py --source real --joints all
+
+# with a recording
+python scripts/m7_mirror_sim.py --source real --joints all --record recordings/session.csv
+```
+
+Same controls and safety envelope as M6. `--record <path>.csv` logs every
+tick's target / real (measured) / sim (mirrored, degrees) for each live
+joint — a plain CSV, not a LeRobot `Dataset`; see
+[Real ↔ sim joint mapping](#real--sim-joint-mapping) for why real and sim
+values are not expected to match exactly.
+
+**Recommended routine:** pose the arm roughly centered by hand before
+launching (torque is off between sessions) — this usually keeps every joint
+inside the envelope so `--recover` isn't needed at all.
+
+### Recovery pattern between sessions
+
+Torque releases on exit, so a loaded joint (typically `shoulder_lift`,
+`elbow_flex`, `wrist_flex`) sags out of the safe envelope within seconds of
+any script quitting. Read-only check, safe any time:
+
+```bash
+python scripts/check_pose.py
+```
+
+If it reports joints outside the envelope, **ignore its own suggestion to
+run `goto_home.py`** (that releases torque on exit and the joint sags right
+back) — use M6's `--recover` instead, then go straight into whatever you
+actually meant to run, minimizing the limp gap in between.
 
 ---
 
@@ -300,9 +400,40 @@ You have the viewer focused. Focus the terminal instead — see the note under
 events; try an X11 session. On some systems the user must be in the `input`
 group.
 
-**`ModuleNotFoundError: No module named 'mujoco'`**
-You are running the system Python rather than the venv. Use the full
+**`ModuleNotFoundError: No module named 'mujoco'`** (or `'lerobot'`)
+You are running the system Python rather than the venv. Activate it
+(`.venv\Scripts\Activate.ps1` / `source .venv/bin/activate`) or use the full
 interpreter path shown in the table above.
+
+**A joint reports `*** OUTSIDE +/-50 ***` at startup**
+Expected after any session ends — torque releases and a loaded joint sags.
+Run `python scripts/m6_keyboard_real.py --joints <name> --recover`, not
+`goto_home.py` (see [Recovery pattern](#recovery-pattern-between-sessions)).
+
+**A key (including `Esc`) does nothing at all with M6/M7 running**
+The focus gate isn't seeing the terminal as focused, even if it looks
+focused on screen — click directly into the terminal window. `Ctrl+C`
+always works regardless and disconnects cleanly.
+
+**One direction key (e.g. `S`) seems dead on a specific joint**
+Check `check_pose.py` first — if that joint is pinned against the `±50`
+safe envelope, only the key pointing back *into* range will do anything;
+the other clamps to the same edge value every tick and looks broken.
+This is the most common cause and is not a bug.
+
+If the joint is well inside the envelope and one key still seems dead, it
+may be real backlash/static friction rather than a software issue —
+`shoulder_lift` in particular was measured (`scripts/characterization/`)
+settling ~10x worse than `elbow_flex` with ~22 ticks of backlash, and can
+stick for 10+ seconds under a held key before releasing. Use
+`--debug-joint <name>` to see whether the *target* is moving (software
+registering the key) while the *measured* position is not (the arm itself
+sticking) — that distinguishes the two.
+
+**Real and sim values don't match exactly in M7**
+Expected — see [Real ↔ sim joint mapping](#real--sim-joint-mapping). The
+mapping is a linear rescale between two different range spans, so it
+preserves direction and relative position, not the exact physical angle.
 
 ---
 

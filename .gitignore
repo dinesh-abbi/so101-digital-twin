@@ -18,7 +18,13 @@ calibration/
 
 # Recorded data
 datasets/
+recordings/
 *.mp4
+debug_*.csv
+trace.csv
+
+# Machine-specific setup run logs
+*_log.txt
 
 # OS
 .DS_Store

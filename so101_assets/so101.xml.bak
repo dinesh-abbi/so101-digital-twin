@@ -65,40 +65,11 @@
     <default class="sts3215">
       <geom contype="0" conaffinity="0"/>
       <joint damping="0.60" frictionloss="0.052" armature="0.028"/>
-      <!-- Position gains FITTED TO THIS ARM (2026-08-26, Task 2).
-
-           Previous values were kp=998.22 kv=2.731, calculated from
-           https://github.com/Gregory119/RBE501-RL-arm-project/blob/main/gymnasium_env/README.md
-           assuming a servo proportional gain of 16. That derivation is not a
-           1-to-1 mapping of the LeRobot servo gains and was never checked
-           against hardware; measured against this arm it is badly
-           underdamped. On a 20-unit elbow step the old gains drove the sim to
-           23.8 deg against a 19.6 deg target - a 4.2 deg overshoot with
-           visible ringing - and peaked at 243 deg/s where the real joint
-           manages 150 deg/s.
-
-           These values come from a grid fit against real recorded step
-           responses (scripts/characterization/tune_actuator.py), fitted on
-           the three step experiments and validated on the ramp, reverse and
-           triangle runs held out of the fit:
-
-               elbow_flex RMSE   fit      1.148 -> 0.366 deg  (68% better)
-                                 held-out 1.470 -> 0.561 deg  (62% better)
-
-           Held-out error improving alongside fit error is what distinguishes
-           a real fit from curve-fitting noise. Peak overshoot on the 20-unit
-           step drops from 8.05 deg to 2.19 deg.
-
-           The RMSE surface is a flat valley along kp/kv ~ 16, so the ratio is
-           what matters, not the absolute magnitudes - any pair on that ridge
-           scores within 0.01 deg. kp=400 sits at the minimum.
-
-           CAVEAT: fitted against elbow_flex only, the one joint characterised
-           so far, and applied to the whole sts3215 class because every joint
-           on this arm uses the same servo. The shoulder carries far more
-           inertia and may want its own fit; re-run tune_actuator.py per joint
-           as each is characterised. -->
-      <position kp="400" kv="25" forcerange="-2.94 2.94"/>
+      <!-- These gains are not a 1-to-1 mapping of the servo gains used in
+           Lerobot. These position gains and forces were calculated according to
+           https://github.com/Gregory119/RBE501-RL-arm-project/blob/main/gymnasium_env/README.md,
+           assuming that the servo proportional gain is set to 16. -->
+      <position kp="998.22" kv="2.731" forcerange="-2.94 2.94"/>
     </default>
 
     <default class="backlash">
