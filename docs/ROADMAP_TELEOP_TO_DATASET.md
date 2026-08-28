@@ -1,4 +1,4 @@
-# Roadmap: Leader-Arm Teleop → Real+Sim Environment Parity → Validated Dataset
+# Roadmap: Leader-Arm Teleop → Real+Sim+Unreal Parity → Mixed-Domain Training
 
 **Status of this document:** a working plan, written from what actually
 exists in this repo today (checked against the code, not assumed), plus
@@ -7,6 +7,18 @@ what would be genuinely new work. Meant to be read alongside
 in full technical detail — this document is about everything **around**
 that piece: the goal it serves, what's still missing, and in what order to
 tackle it.
+
+**The full intended end state** (added 2026-08-28, so it's written down
+somewhere rather than living only in conversation): replicate real
+recorded data into the MuJoCo twin, generate additional synthetic data
+from the sim, pipe MuJoCo's physics into Unreal Engine for photorealistic
+rendering of that same synthetic data, then train on **mixed ratios** of
+real / MuJoCo-sim / Unreal-rendered data (sim+real, sim+unreal,
+real+unreal, and combinations), and finally **infer with the same trained
+policy in all three environments** (MuJoCo, the real arm, Unreal) to check
+it generalizes rather than overfitting to one domain's quirks. Phases G–J
+below cover this; Phases A–F remain the prerequisite foundation it's built
+on.
 
 ---
 
@@ -257,6 +269,96 @@ checking, before training on it:
 data exists; the numeric checks above would need small project-specific
 scripts, same spirit as `validate_scenes.py` and `analyze_joint_response.py`.
 
+### Phase G — MuJoCo → Unreal Engine bridge (photorealistic rendering)
+
+**Status: not started, not decided.** The intended shape, settled here so
+it's written down rather than assumed: **MuJoCo remains the single source
+of physics truth; Unreal only renders.** Concretely, that means every
+simulation step MuJoCo's joint angles and object poses get piped into
+Unreal (socket / shared-memory / file handoff — not yet chosen) purely to
+pose a visual scene and render a frame, and Unreal never runs its own
+physics for this arm.
+
+**Explicitly rejected alternative: dual simulation** (both engines running
+physics independently, results compared/reconciled). Two physics engines
+simulating the same scene will diverge from each other over time for the
+same reason real and sim already diverge from each other — floating-point
+integration, contact-solver differences, timestep differences — and now
+you'd be debugging *three* domains' disagreements (real vs. MuJoCo, real
+vs. Unreal, MuJoCo vs. Unreal) instead of one. Single-source-of-physics
+avoids that entirely: Unreal is a camera, not a second opinion.
+
+**What this phase actually requires, concretely:**
+- A matching Unreal scene: the same table, the same SO-101 arm mesh, the
+  same object models — visual assets that don't exist for Unreal today,
+  only for MuJoCo's simpler rendering pipeline.
+- A synchronization layer streaming MuJoCo's per-step pose data into
+  Unreal in real time (or batch, for offline dataset generation, which is
+  the more realistic mode for this use case — you don't need this to run
+  live at 20 Hz, only to reproduce a recorded/generated trajectory
+  frame-by-frame for rendering).
+- This is realistically the **single largest new build** in the whole plan
+  — bigger than the joint-characterization work already done, because it's
+  new infrastructure (two engines talking to each other) rather than new
+  measurements on an existing setup.
+
+**Do not start this before Phase B is solid.** Rendering a twin
+photorealistically doesn't fix an inaccurate twin — it just makes the
+inaccuracy look convincing. Get MuJoCo's own object/scene parity right
+first, on the simpler engine, before adding a second engine and a
+synchronization problem on top of an unverified foundation.
+
+### Phase H — Synthetic data generation + domain randomization
+
+**Status: not started.** Once Phase G exists, MuJoCo can generate
+trajectories beyond what was ever physically recorded (new object
+positions, new arm configurations) and render them through Unreal.
+
+**The one non-obvious trap here, worth stating plainly:** photorealistic
+rendering alone does not automatically make synthetic data *useful* for
+closing the sim-to-real gap — and can make it worse. If every synthetic
+frame shares one fixed lighting setup, one fixed camera position, one
+fixed set of textures, a trained model can learn to key off those
+rendering-specific artifacts instead of the actual task, and will then
+fail to transfer to the real camera's genuinely different lighting/noise/
+angle. The standard fix is **domain randomization** — deliberately varying
+lighting, textures, camera pose/noise, and object appearance across the
+synthetic dataset, so the model is forced to learn the task rather than
+the renderer's fingerprint. This needs to be designed into Phase H from
+the start, not bolted on after a first attempt underperforms.
+
+### Phase I — Mixed-ratio training (sim+real, sim+unreal, real+unreal, combined)
+
+**Status: not started, depends entirely on G/H existing.** The experimental
+question — "what ratio of real / MuJoCo-sim / Unreal-rendered data produces
+a policy that generalizes best" — is a legitimate and standard question in
+sim-to-real robotics research. But it can only answer that question cleanly
+if the *ingredients* are already independently trustworthy:
+
+**Why Phase A/B must be done before this phase, not just before Phase G:**
+if a policy trained on some ratio performs badly on the real arm, there
+are two possible explanations — the ratio was wrong, or the MuJoCo twin's
+underlying dynamics were wrong to begin with (Phase A/B's job). Without
+Phase A/B already closed, this experiment **cannot distinguish those two
+causes** — a bad ratio and a bad twin look identical from the outside
+("real-world performance is worse than expected"). This is the same
+tangled-cause failure mode the project already hit once with
+`shoulder_lift` (where an 18%-better-looking gain fit was actually
+absorbing a mislabeled calibration-drift error, not a real dynamics
+improvement) — same shape of mistake, higher cost if it happens at the
+scale of a full training run instead of a single gain sweep.
+
+### Phase J — Cross-domain inference (deploy the same trained policy in MuJoCo, real, and Unreal)
+
+**Status: not started, final phase.** Run the one policy trained in Phase I
+inside all three environments and compare behavior — this is the actual
+test of whether the mixed-domain training worked, not just a nice-to-have
+demo. A policy that performs well in MuJoCo and Unreal but poorly on the
+real arm is telling you the sim-to-real gap is still open somewhere
+upstream (most likely Phase A/B's remaining coverage gaps, or Phase H's
+domain randomization being insufficient) — this phase is a diagnostic as
+much as a deliverable.
+
 ---
 
 ## 5. Suggested Order, and Why
@@ -279,7 +381,34 @@ Phase E (dataset recording)   →  needs a trustworthy environment (B) and
         |                         a working input source (C or D) first
         v
 Phase F (dataset validation)  →  must exist before any training is trusted
+        |
+        v
+Phase G (MuJoCo -> Unreal bridge)     →  render a twin you already trust;
+        |                                 do NOT start this before B is solid
+        v
+Phase H (synthetic data + domain      →  needs G; randomization must be
+        randomization)                   designed in from the start, not
+        |                                 bolted on after
+        v
+Phase I (mixed-ratio training:        →  needs A/B closed first, or a bad
+        sim+real, sim+unreal,            ratio and a bad twin become
+        real+unreal, combined)           indistinguishable from the outside
+        |
+        v
+Phase J (cross-domain inference:      →  the actual test of whether any of
+        deploy in MuJoCo + real +        this worked; a diagnostic as much
+        Unreal, compare)                 as a deliverable
 ```
+
+**Why Phases G–J are ordered strictly after A–F, not in parallel:**
+every later phase inherits the earlier phases' errors silently. An
+inaccurate twin (open item in A/B) doesn't just make the mirrored sim
+"look a bit off" the way it did in early M7 testing — once it's feeding a
+synthetic-data generator (Phase H) and a mixed-ratio training run
+(Phase I), the same inaccuracy becomes baked into every synthetic sample
+at scale, and there is no ratio of real/sim/Unreal data that can correct
+for a systematic bias in one of the ingredients. Close the foundation
+before building the pipeline on top of it.
 
 **Why object/scene parity (B) comes before leader-arm/VR (C/D):** whichever
 input source ends up driving the arm, the thing being recorded is
@@ -303,6 +432,10 @@ gains, and the two early wrong backlash readings.
 | D | A VR session produces smooth, low-latency control comparable to what telegrip already achieved on Quest 2, without fighting the SDK the whole session |
 | E | An episode recorded end-to-end lands in `LeRobotDataset` format and plays back correctly in `lerobot-dataset-viz` |
 | F | A validation script flags a deliberately-corrupted test episode (bad timestamp, teleported object, impossible joint velocity) and passes a known-good one — i.e., the validator is itself tested, not just assumed to work |
+| G | A MuJoCo trajectory (recorded or newly generated) renders correctly in Unreal, frame-for-frame, with no drift between what MuJoCo says the pose is and what Unreal shows |
+| H | A domain-randomization sweep (lighting/texture/camera variation) is actually implemented and demonstrably varies output frames — not just a single fixed photorealistic render repeated |
+| I | Multiple sim/real/Unreal ratios are trained and scored against a **held-out real-hardware test set**, the same fit-vs-held-out discipline `tune_actuator.py` already uses, so a ratio's apparent improvement can be trusted rather than being an artifact |
+| J | The same trained policy is deployed unmodified in MuJoCo, on the real arm, and in Unreal, and the three performance numbers are reported side by side — not just "it worked in sim" |
 
 ---
 
@@ -319,3 +452,21 @@ sim, and validating that the glue is actually correct** — rather than
 inventing new algorithms. That's a realistic, honest scope for the work
 ahead, and it's the same scope that made the joint-mapping work legitimate
 without needing to be called a breakthrough.
+
+The same is true of Phases G–J, with one difference worth naming plainly:
+mixed real/sim/photorealistic-render training with cross-domain inference
+is a well-precedented *strategy* in sim-to-real robotics research (domain
+randomization, mixed-domain training), so choosing to pursue it isn't a
+wrong turn — but it is a strategy that **amplifies whatever it's built on**.
+It cannot fix an inaccurate twin by blending in more real data, and it
+cannot tell a bad training ratio apart from a bad twin unless the twin was
+already independently verified first. That's the entire reason Phases A–F
+are positioned as strictly prerequisite rather than parallel work: not
+because rendering and mixed-domain training are unimportant, but because
+this project's own history (the unfitted `so101.xml` gains sitting
+unchecked, two wrong backlash readings, a mislabeled calibration-drift
+error that looked like a real improvement) is direct, repeated proof of
+what happens when something is built on top of a measurement that was
+assumed correct rather than verified. Phases G–J are where that lesson
+matters most, because they operate at dataset scale instead of a single
+script's output.

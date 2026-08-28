@@ -29,8 +29,9 @@ machine has since built substantially past it (M6, M7, Task 1/2,
 - `docs/REAL_SIM_MAPPING_DEEP_DIVE.md` — full technical writeup of the
   real↔sim mapping, characterization, and gain-fitting pipeline
 - `docs/ROADMAP_TELEOP_TO_DATASET.md` — the larger goal (leader-arm teleop,
-  object/scene parity, dataset recording + validation) and what phase each
-  part is in
+  object/scene parity, dataset recording + validation, then a MuJoCo→Unreal
+  rendering bridge, synthetic data, mixed real/sim/Unreal-ratio training,
+  and cross-domain inference) and what phase each part is in
 
 ## A separate, unrelated project lives on this PC — do not conflate it
 

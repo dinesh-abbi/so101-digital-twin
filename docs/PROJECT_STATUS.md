@@ -10,9 +10,10 @@ historical; everything in it is done).
 This file tracks status at two levels:
 - **§1 Milestones (M1–M7 + Task 1/2)** — the granular, already-largely-done
   work, matching the tables in `CLAUDE.md` and `README.md`.
-- **§2 Phases (A–F)** — the larger goal from
+- **§2 Phases (A–J)** — the larger goal from
   `docs/ROADMAP_TELEOP_TO_DATASET.md` (leader-arm teleop → environment
-  parity → dataset → validation), which milestones M1–M7 are only the first
+  parity → dataset → validation → Unreal rendering → mixed-domain training
+  → cross-domain inference), which milestones M1–M7 are only the first
   slice of.
 
 ---
@@ -53,7 +54,19 @@ Phase C: Leader-arm teleop          [..........]  Blocked — no leader-arm hard
 Phase D: VR teleop (revisited)      [..........]  Attempted once (Quest, non-telegrip), unsuccessful
 Phase E: Dataset recording          [..........]  Not started — current --record output is a debug CSV, not a training dataset
 Phase F: Dataset validation         [..........]  Not started — depends on E existing first
+Phase G: MuJoCo -> Unreal bridge    [..........]  Not started, not decided — do not start before B is solid
+Phase H: Synthetic data + rand.     [..........]  Not started — depends on G
+Phase I: Mixed-ratio training       [..........]  Not started — depends on A/B being closed first, or results are uninterpretable
+Phase J: Cross-domain inference     [..........]  Not started — depends on I
 ```
+
+**Phases G–J** (added 2026-08-28) are the full intended end state: replicate
+real data into the MuJoCo twin, generate synthetic data from sim, render
+that through Unreal for photorealism, train on mixed ratios of
+real/sim/Unreal data, then deploy the same trained policy in all three
+environments to check it generalizes. Full detail, including why these are
+ordered strictly after A–F rather than in parallel:
+`docs/ROADMAP_TELEOP_TO_DATASET.md` §4 (Phases G–J) and §5.
 
 ### Phase A — Finish joint-level parity
 **Status: IN PROGRESS.** `elbow_flex` and `shoulder_lift` are fully
@@ -115,6 +128,33 @@ validate. Planned checks (timestamp integrity, physical plausibility
 against Task 1's measured real-world limits, real/sim agreement within
 established error bounds, object pose sanity) are specified in the roadmap
 but not yet implemented as scripts.
+
+### Phase G — MuJoCo → Unreal Engine bridge
+**Status: NOT STARTED, not decided.** MuJoCo stays the single source of
+physics; Unreal only renders (dual simulation was explicitly considered
+and rejected — two independent physics engines would diverge from each
+other for the same reasons real and sim already diverge). Realistically
+the largest single new build in the whole plan — new Unreal-side assets
+plus a pose-sync layer, neither of which exist yet. **Do not start before
+Phase B is solid** — rendering an inaccurate twin photorealistically just
+makes the inaccuracy convincing, not correct.
+
+### Phase H — Synthetic data generation + domain randomization
+**Status: NOT STARTED.** Depends on Phase G. Domain randomization
+(varying lighting/textures/camera pose across synthetic frames) needs to
+be designed in from the start — photorealistic rendering alone can make
+sim-to-real transfer worse if a model learns the renderer's fixed
+fingerprint instead of the task.
+
+### Phase I — Mixed-ratio training (sim+real, sim+unreal, real+unreal)
+**Status: NOT STARTED.** Depends on G/H, and requires Phase A/B already
+closed — without that, a bad training ratio and a bad twin produce the
+same symptom (worse real-world performance) and can't be told apart.
+
+### Phase J — Cross-domain inference (deploy in MuJoCo + real + Unreal)
+**Status: NOT STARTED.** The actual test of whether the mixed-domain
+training closed the sim-to-real gap — run one trained policy in all three
+environments and compare, rather than trusting sim performance alone.
 
 ---
 
