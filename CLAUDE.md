@@ -9,33 +9,38 @@ what's actually left to do.
 
 A real-to-sim digital twin of an SO-101 robot arm workspace: an IKEA
 LINNMON/ADILS table modeled in MuJoCo, the SO-101 arm placed on it, and a
-plan to synchronize a real physical follower arm with the simulated one —
-first via keyboard input (standing in for a leader arm we don't have yet),
-later via VR or an actual leader arm.
+real physical follower arm kept synchronized with the simulated one —
+currently via keyboard input (standing in for a leader arm we don't have
+yet), later via VR or an actual leader arm.
 
-This machine's job: **run the real SO-101 follower arm** and help verify the
-real↔sim joint mapping. The heavy MuJoCo development already happened on a
-separate Linux server and is DONE and VALIDATED there — do not redo it.
+This machine's job: **run the real SO-101 follower arm**, characterize its
+real behaviour, fit the simulation to match it, and drive both together.
+M1–M7 plus Task 1/2 characterization are all DONE on this machine — see
+Status below. The heavy MuJoCo scene/asset development originally happened
+on a separate Linux server; that groundwork is done and validated, this
+machine has since built substantially past it (M6, M7, Task 1/2,
+`twin.py`, and everything in `docs/` are Windows-native work).
 
-## Two unrelated projects live on this PC — do not conflate them
+### Read these before deep-diving into how the mapping/pipeline works
 
-1. **`D:\robotics\so101-vr\`** — an EARLIER, SEPARATE project: `telegrip`
-   VR/keyboard teleoperation + LeRobot dataset recording. Python 3.11.9,
-   `torch 2.10.0+cpu`, `lerobot==0.4.4`, `pybullet 3.2.7` (compiled from
-   source with MSVC). Working: 6/6 servos calibrated, keyboard AND Quest 2
-   VR control verified live, clean 20Hz dataset recordings on COM8.
-   **Do not modify, reuse, or install into that venv.**
-2. **`D:\robotics\so101-digital-twin\`** — THIS project. Separate venv,
-   needs only `mujoco`, `numpy`, `pynput`. No `torch`, `lerobot`, or
-   `pybullet`.
+- `docs/PROJECT_STATUS.md` — current milestone + phase status, what's left
+- `docs/MOTOR_CHECK_AND_MAPPING_SIMPLE.md` — per-motor table (all 6 IDs,
+  ranges, which have been behavior-tested), simple explanation first
+- `docs/REAL_SIM_MAPPING_DEEP_DIVE.md` — full technical writeup of the
+  real↔sim mapping, characterization, and gain-fitting pipeline
+- `docs/ROADMAP_TELEOP_TO_DATASET.md` — the larger goal (leader-arm teleop,
+  object/scene parity, dataset recording + validation) and what phase each
+  part is in
 
-Both venvs are built from the same base interpreter
-(`C:\Users\abbid\AppData\Local\Programs\Python\Python311`, 3.11.9) but are
-fully isolated. Sharing the base interpreter is read-only and safe.
+## A separate, unrelated project lives on this PC — do not conflate it
 
-If a task here needs `lerobot`'s hardware driver (`SO101Follower`,
-`lerobot-calibrate`), that's a deliberate bridge to project 1 — confirm
-with the user first, since it changes this venv's weight substantially.
+`D:\robotics\so101-vr\` is an earlier, separate project with its own venv,
+its own `lerobot`/`torch`/`pybullet` install, and its own hardware session
+history. It is out of scope here. **Never modify, reuse, or install into
+that venv, and do not pull its history or status into this file.** This
+project (`D:\robotics\so101-digital-twin\`) has its own venv and, as of
+M6/M7, does use `lerobot` directly (see Installed below) — that overlap in
+dependency is coincidental, not a link between the two projects.
 
 ## Layout on this machine
 
@@ -82,16 +87,21 @@ change and the `gripperframe` quaternion fix (`1 0 1 0` → `0 0 1 0`).
 
 | Milestone | What | Status |
 |---|---|---|
-| M1 | LINNMON/ADILS table (`table_scene.xml`) | DONE, validated on Linux + **loads on Windows** |
-| M2 | Runtime cube spawning (`spawn_cube_test/`) | DONE, validated + **loads on Windows** |
-| M3 | SO-101 + table (`robot_on_table_test/`) | DONE, validated + **loads on Windows** |
+| M1 | LINNMON/ADILS table (`table_scene.xml`) | DONE, validated on Windows |
+| M2 | Runtime cube spawning (`spawn_cube_test/`) | DONE, validated on Windows. Sim-only — no real-object connection (see `docs/ROADMAP_TELEOP_TO_DATASET.md` Phase B) |
+| M3 | SO-101 + table (`robot_on_table_test/`) | DONE, validated on Windows |
 | M4 | Joint range/axis sanity check | DONE (part of M3) |
-| M5 | Keyboard → MuJoCo (`robot_keyboard_test/`) | DONE, validated + **RUNS on Windows** (see hotkey note) |
-| M6-prep | Real↔sim mapping math (`real_sim_mapping_test/`) | **FILES MISSING ON THIS MACHINE — see below** |
-| M6 | Keyboard → real follower arm | **NOT STARTED — happens here** |
-| M7 | Keyboard → real follower + MuJoCo together | Not started |
-| Task 1 | Real elbow_flex characterisation | DONE 2026-08-26 — `scripts/characterization/RESULTS.md` |
-| Task 2 | Replay real trajectories in sim, fit the model | DONE 2026-08-26 — sim RMSE 1.254° → 0.434° |
+| M5 | Keyboard → MuJoCo (`robot_keyboard_test/`) | DONE, validated on Windows (see hotkey note) |
+| M6-prep | Real↔sim mapping math (`real_sim_mapping_test/real_sim_joint_mapping.py`) | DONE, unit tested — `validate_real_sim_mapping.py` |
+| M6 | Keyboard → real follower arm (`m6_keyboard_real.py`) | DONE, validated on hardware |
+| M7 | Keyboard → real follower + MuJoCo together (`m7_mirror_sim.py`) | DONE, validated on hardware |
+| Task 1 | Real joint characterisation | DONE for `elbow_flex` + `shoulder_lift` (2026-08-26) — `scripts/characterization/RESULTS.md`. **NOT done** for `shoulder_pan`, `wrist_flex`, `wrist_roll`, `gripper` |
+| Task 2 | Replay real trajectories in sim, fit the model | DONE for `elbow_flex` (2026-08-26) — sim RMSE 1.254° → 0.434°, gains applied to the shared `sts3215` class |
+| `twin.py` | Unified CLI dispatcher (subcommands + interactive menu) for every script below | DONE — `python scripts\twin.py` |
+
+Full phase-by-phase breakdown (including everything past M7 — object/scene
+parity, leader-arm teleop, dataset recording/validation) is tracked in
+`docs/PROJECT_STATUS.md`, not duplicated here.
 
 ### Model gains are now FITTED, not derived (2026-08-26)
 
@@ -211,13 +221,6 @@ against a superseded calibration.
   and back down to 0, so no command is settled from both directions. Do not
   cite "no hysteresis" as a result. Repeatability sd 0.088° bounds it.
 
-### ⚠️ `real_sim_mapping_test/` is EMPTY on this machine
-
-The folder transferred but `real_sim_joint_mapping.py` did not. M6 depends on
-it. **Transfer it from the Linux dev machine before starting M6** — do not
-rewrite it from scratch; it is already unit-tested there and re-deriving the
-normalization math invites subtle sign/range errors.
-
 ## Windows validation results (measured 2026-08-25, not assumed)
 
 ### Headless scene loading — 4/4 PASS
@@ -288,26 +291,32 @@ behaviour differed enough that this was not hit.
 **Workaround in use: keep the TERMINAL focused while driving joints.**
 No code change needed for sim-only work.
 
-### 🔴 Safety requirement before M6
+### 🔴 Safety requirement for M6/M7 (real hardware) — RESOLVED 2026-08-26
 
 `pynput_keyboard.Listener` is created with no `suppress` argument, so the
 hook is **global** — keys register regardless of focus. Harmless in
-simulation. **Once M6 drives a real arm, any keystroke in any window
-(browser, terminal, editor) could move real servos.**
+simulation; on real hardware, any keystroke in any window (browser,
+terminal, editor) could move real servos without a gate.
 
-**DONE 2026-08-26.** `KeyboardInput(require_focus="<title substring>")` gates
-every key on that window being focused, via `GetForegroundWindow()`. The gate
-is checked on press and again in `snapshot_held()` at the point of use, and
-any held key is dropped the moment focus is lost — so a joint cannot keep
-moving after an alt-tab. Esc stays ungated so quitting always works; space
-(reset to rest pose) is gated because it commands a large motion.
+`KeyboardInput(require_focus="<title substring>")` gates every key on that
+window being focused, via `GetForegroundWindow()`. The gate is checked on
+press and again in `snapshot_held()` at the point of use, and any held key
+is dropped the moment focus is lost — so a joint cannot keep moving after
+an alt-tab. Esc stays ungated so quitting always works; space (reset to
+rest pose) is gated because it commands a large motion.
 
 Simulation keeps the ungated default, so M5 behaviour is unchanged and
 `validate_keyboard_robot.py` still passes. **Anything that drives hardware
 must pass `require_focus`** — constructing it on a platform without the
 focus check raises rather than silently running a global hook ungated.
 
-## The real↔sim joint mapping (read before M6)
+`m6_keyboard_real.py` auto-detects the focused window title at startup
+(`detect_focus_title()`) rather than requiring it to be typed in. `m7_mirror_sim.py`
+originally shipped with a stale hardcoded default title left over from a
+different project's window name, which silently ate every keystroke — fixed
+2026-08-28 to use the same auto-detect approach as M6.
+
+## The real↔sim joint mapping
 
 Two coordinate systems that do NOT naturally agree:
 
@@ -412,36 +421,65 @@ between real and sim until checked visually.
 
 ## Commands
 
+**Preferred: the unified dispatcher, `scripts\twin.py`.** Covers every
+command below plus calibration, pose checks, recovery, and the full
+characterization pipeline — run with no arguments for an interactive menu
+(pick a command by number, answer a few flag prompts, confirm before it
+runs), or `--help` for the full subcommand list.
+
+```powershell
+D:\robotics\so101-digital-twin\.venv\Scripts\python.exe D:\robotics\so101-digital-twin\scripts\twin.py
+```
+
+Individual scripts (what `twin.py` calls under the hood), for reference:
+
 ```powershell
 # this project's Python
 D:\robotics\so101-digital-twin\.venv\Scripts\python.exe
 
 # headless check of all four scenes
-D:\robotics\so101-digital-twin\.venv\Scripts\python.exe D:\robotics\so101-digital-twin\scripts\validate_scenes.py
+..\.venv\Scripts\python.exe scripts\validate_scenes.py
 
-# M1 table viewer  (WORKS)
-cd D:\robotics\so101-digital-twin\scripts\digital_twin_env
-..\..\.venv\Scripts\python.exe run_table.py
+# M1 table viewer
+cd scripts\digital_twin_env & ..\..\.venv\Scripts\python.exe run_table.py
 
-# M2 falling cube  (WORKS)
-cd D:\robotics\so101-digital-twin\scripts\digital_twin_env\spawn_cube_test
-..\..\..\.venv\Scripts\python.exe spawn_cube.py
+# M2 falling cube (sim-only, no real-object connection)
+cd scripts\digital_twin_env\spawn_cube_test & ..\..\..\.venv\Scripts\python.exe spawn_cube.py
 
-# M3 robot on table  (WORKS)
-cd D:\robotics\so101-digital-twin\scripts\digital_twin_env\robot_on_table_test
-..\..\..\.venv\Scripts\python.exe run_robot_on_table.py
+# M3 robot on table
+cd scripts\digital_twin_env\robot_on_table_test & ..\..\..\.venv\Scripts\python.exe run_robot_on_table.py
 
-# M5 keyboard control  (WORKS - keep the TERMINAL focused, not the viewer)
-cd D:\robotics\so101-digital-twin\scripts\digital_twin_env\robot_keyboard_test
-..\..\..\.venv\Scripts\python.exe keyboard_robot.py
+# M5 keyboard -> sim only (keep the TERMINAL focused, not the viewer)
+cd scripts\digital_twin_env\robot_keyboard_test & ..\..\..\.venv\Scripts\python.exe keyboard_robot.py
+
+# M6 keyboard -> real arm only
+..\.venv\Scripts\python.exe scripts\m6_keyboard_real.py --joints elbow_flex
+
+# M7 keyboard -> real arm + mirrored sim together
+..\.venv\Scripts\python.exe scripts\m7_mirror_sim.py --source real --joints elbow_flex
 ```
 
-Keyboard controls: `Q/A W/S E/D R/F T/G Y/H` for the 6 joints ±,
-`Space` reset, `Esc` quit. Movement is 0.1° per simulation step — slow by
-design. Targets are clamped to the model's real `jnt_range`.
+Keyboard controls (M5/M6/M7 all share this scheme): `Q/A W/S E/D R/F T/G
+Y/H` for the 6 joints ±, `Space` reset, `Esc` quit. M5 (sim-only) moves
+0.1° per simulation step. M6/M7 (real hardware) move ~5 units/s while a key
+is held, clamped to `±SAFE_LIMIT` (50 normalized units) and to LeRobot's
+`max_relative_target` per-command clamp — see M6/M7's own docstrings for
+the full safety-layer breakdown, not repeated here.
+
+## Real hardware safety, in one place
+
+M6 (`m6_keyboard_real.py`) and M7 (`m7_mirror_sim.py`) both require, always
+on: a focus gate (auto-detected window title, keys act only while it's
+focused), LeRobot's per-command `max_relative_target` clamp, a `±50`
+normalized-unit safe envelope well inside the calibrated range, and one
+joint live at a time by default (`--joints all` widens it). The arm goes
+LIMP the instant either script exits — support it. Full detail, recovery
+patterns, and troubleshooting: `README.md` → "Working with real hardware".
 
 ## Installed
 
 `mujoco 3.12.0` · `numpy 2.4.6` · `pynput 1.8.2` · `glfw 2.10.2` ·
-`pyopengl 3.1.10` · `absl-py 2.5.0` · `etils 1.14.0` — ~50 MB total, no
-compilation required (unlike project 1's pybullet).
+`pyopengl 3.1.10` · `absl-py 2.5.0` · `etils 1.14.0` · `lerobot 0.4.4`
+(added for M6/M7 — `SOFollower` hardware driver, `lerobot-calibrate`, and
+the other `lerobot-*` console scripts) — installed via `setup.ps1` (M1–M5)
+then `setup_m6.ps1` (adds `lerobot` on top).

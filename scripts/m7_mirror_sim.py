@@ -128,9 +128,11 @@ def parse_args():
                          "Default: elbow_flex only.")
     ap.add_argument("--port", default="COM9")
     ap.add_argument("--id", default="twin_follower")
-    ap.add_argument("--require-focus", default="VR-SO-101 - Antigravity ",
+    ap.add_argument("--require-focus", default=None,
                     help="Keys act only while the focused window title "
-                         "contains this. Real hardware only.")
+                         "contains this. Real hardware only. Default: "
+                         "auto-detect whichever window is focused at "
+                         "startup (same as M6).")
     ap.add_argument("--step", type=float, default=STEP_PER_TICK)
     ap.add_argument("--safe-limit", type=float, default=SAFE_LIMIT)
     ap.add_argument("--max-relative-target", type=float,
@@ -143,6 +145,35 @@ def parse_args():
                          "just a comparison trace of target vs measured vs "
                          "mirrored sim over time.")
     return ap.parse_args()
+
+
+def detect_focus_title():
+    """The title of whatever window is focused right now.
+
+    Copied from m6_keyboard_real.py rather than imported: hardcoding a
+    window title (previously "VR-SO-101 - Antigravity ", left over from a
+    different project's window name) silently ate every keystroke, since
+    that substring never appeared in this project's actual window title.
+    Detecting beats guessing -- see M6's version of this function for the
+    IDE-vs-terminal story.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+    except ImportError:
+        return None
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    n = user32.GetWindowTextLengthW(hwnd)
+    if n <= 0:
+        return None
+    buf = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, buf, n + 1)
+    title = buf.value.strip()
+    return title[:24] if title else None
 
 
 def resolve_live(spec):
@@ -159,6 +190,13 @@ def resolve_live(spec):
 def main():
     args = parse_args()
     live = resolve_live(args.joints)
+
+    if args.source == "real" and args.require_focus is None:
+        args.require_focus = detect_focus_title()
+        if not args.require_focus:
+            sys.exit("could not detect the focused window title.\n"
+                     "Pass --require-focus '<part of your terminal title>' "
+                     "explicitly.")
 
     print("=" * 70)
     print(f"  M7 - keyboard -> {'REAL + SIM (mirrored)' if args.source == 'real' else 'SIM ONLY (no hardware)'}")

@@ -258,9 +258,9 @@ Read from the compiled model, not hardcoded:
 ## Working with real hardware (M6 / M7)
 
 > **⚠️ Safety.** `m6_keyboard_real.py` and `m7_mirror_sim.py` gate every key
-> behind a focus check — by default keys act only while a window whose title
-> contains `VR-SO-101 - Antigravity ` is focused (override with
-> `--require-focus`). **Click directly into that terminal window before
+> behind a focus check — by default keys act only while the window that was
+> focused when the script started stays focused (auto-detected; override
+> with `--require-focus '<substring>'`). **Click directly into that same
 > pressing any control key** — a global keyboard hook can register the OS as
 > not having given it real focus even if it looks focused, and every key
 > (including `Esc`) will silently do nothing. `Ctrl+C` always works
