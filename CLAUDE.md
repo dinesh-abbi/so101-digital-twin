@@ -23,6 +23,10 @@ machine has since built substantially past it (M6, M7, Task 1/2,
 
 ### Read these before deep-diving into how the mapping/pipeline works
 
+- `docs/KEYBOARD_CONTROL_TO_LEADER_ARM_OVERVIEW.md` — the complete
+  narrative: keyboard control journey, all-6-joints characterization
+  results, a ROS/Gazebo comparison, validation record, and the leader-arm
+  plan — written for mentor/regular/deep-technical readers alike
 - `docs/PROJECT_STATUS.md` — current milestone + phase status, what's left
 - `docs/MOTOR_CHECK_AND_MAPPING_SIMPLE.md` — per-motor table (all 6 IDs,
   ranges, which have been behavior-tested), simple explanation first
