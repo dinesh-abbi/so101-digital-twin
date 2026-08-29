@@ -1,6 +1,88 @@
 # Project Status — SO-101 Digital Twin
 
-**Last updated:** 2026-08-28
+**Last updated:** 2026-08-29
+
+## 🔴 Open hardware issue: shoulder_lift will not move in its -1 direction (2026-08-29)
+
+Discovered while validating M6/M7 keyboard control after this session's
+joint characterization work. `shoulder_lift`'s `-1` direction (the `s` key)
+sends real commands — confirmed via `--debug-joint shoulder_lift` (target
+counts down correctly every control tick) — but the servo's actual
+position never changes for the whole duration of the hold, at any starting
+position, in a fresh terminal session, after a full `lerobot-calibrate`
+resync. The `+1` direction (`w`) works normally throughout.
+
+**Ruled out:**
+- Stuck/jammed mechanism — moves freely by hand in both directions.
+- Being outside the servo's firmware position limits — checked directly
+  against `Min_Position_Limit`/`Max_Position_Limit` registers at the time
+  of the freeze; present position was mid-range, nowhere near either edge.
+- Stale calibration/firmware limit mismatch — a full `lerobot-calibrate`
+  sweep resynced everything (firmware limits moved to match the new sweep,
+  confirmed by direct register read) and the issue was unchanged afterward.
+- A leash/software bug specific to M6/M7's control loop — a single raw
+  low-level `Goal_Position` write in the `-1` direction, bypassing
+  LeRobot's `SOFollower`/`send_action()` entirely, DID move the servo
+  successfully (verified twice, at two different starting positions).
+
+**Also ruled out:** a rate/threshold issue — held `s` continuously for
+15-20 seconds and `actual` never moved even a single tick throughout. This
+is a hard, complete block in the `-1` direction through this control path,
+not a slow response.
+
+**Extensive follow-up isolation testing (same session, still 2026-08-29)**
+tried to reproduce the freeze with standalone scripts replicating each
+piece of M6's write path individually, working outward from the simplest
+mechanism to the most M6-like:
+- `sync_write` (LeRobot's actual `GroupSyncWrite` broadcast protocol, not
+  the addressed `write2ByteTxRx` used in the first direct test) — single
+  `-30` write worked; repeated `-10` writes stalled after the first one
+  (this looked like a real lead at first).
+- Repeated small `+5` vs `-5` steps at matched 20 Hz timing, shoulder_lift
+  only — **both directions worked identically**, contradicting the sync_write
+  finding above.
+- The exact read-present-position → accumulate target → leash → write
+  sequence M6 uses per tick, negative direction — worked fine, smooth
+  20-step descent.
+- `send_action`'s actual return value (`sent` vs `requested`), instrumented
+  directly inside `m6_keyboard_real.py` — **always equal**, so LeRobot's own
+  `max_relative_target` clamp is not silently rewriting the target.
+- The full 6-joint `sync_write` payload M6 actually sends every tick (5
+  joints held at their exact starting ticks, shoulder_lift decreasing) —
+  **also worked fine**, smooth 25-step descent.
+- `P_Coefficient` (LeRobot's `configure()` lowers this to 16 from the
+  servo's default 32 "to avoid shakiness") looked like a promising lead,
+  but the multi-joint test above already succeeded at the same P=16, so
+  this is ruled out too.
+
+**Net result: every mechanism tested in isolation — outside M6's actual
+running process — works correctly in both directions, including the exact
+wire payload and timing M6 uses.** Only M6 itself, run live, reliably
+fails. The one component no standalone script replicates is the `pynput`
+keyboard listener's background thread running concurrently with the
+control loop; that's the next thing to test (drive `shoulder_lift`'s `-1`
+programmatically from inside a running M6-shaped process, bypassing
+`pynput` entirely, to see if the listener thread itself is implicated) if
+this gets picked up again. Given how much has already been ruled out
+without success, this was deliberately parked rather than pursued further
+in this session.
+
+**Current workaround, not a fix:** `shoulder_lift` moved off `w`/`s` onto
+`up`/`down` in both `m6_keyboard_real.py` and `m7_mirror_sim.py`, so its
+still-working `+1` direction has its own dedicated key rather than being
+folded into a "both keys do the same thing" compromise; `down` currently
+does nothing. `w`/`s` now duplicate `e`/`d` (elbow_flex), so nothing lost
+its keys. `space` (reset to rest pose) still works normally via
+`goto_home.py`'s absolute positioning, which does not depend on the `-1`
+per-tick direction. Revert the whole rebinding once the real cause is
+found — there's no reason for the layout to differ from M5 otherwise.
+
+**Also fixed in passing:** `twin.py calibrate` failed with "lerobot-calibrate
+not found on PATH" even though it's installed — `shutil.which()` only
+searches the `PATH` env var, which doesn't include the venv's own `Scripts`
+folder when the venv is invoked via an absolute `python.exe` path (this
+project's own convention) rather than activated. Fixed to fall back to
+checking next to `sys.executable`.
 **Purpose of this file:** the single place to check "where are we right now"
 and "what's left to do." Update this whenever a phase or milestone changes
 state — this is a living tracker, not a one-time snapshot like
@@ -48,7 +130,7 @@ Full detail on the joint-mapping math specifically:
 `docs/REAL_SIM_MAPPING_DEEP_DIVE.md`.
 
 ```
-Phase A: Finish joint parity        [====......]  2 of 6 joints characterized
+Phase A: Finish joint parity        [==========]  6 of 6 joints characterized, DONE
 Phase B: Object/scene parity        [..........]  Not started
 Phase C: Leader-arm teleop          [..........]  Blocked — no leader-arm hardware yet
 Phase D: VR teleop (revisited)      [..........]  Attempted once (Quest, non-telegrip), unsuccessful
@@ -69,19 +151,100 @@ ordered strictly after A–F rather than in parallel:
 `docs/ROADMAP_TELEOP_TO_DATASET.md` §4 (Phases G–J) and §5.
 
 ### Phase A — Finish joint-level parity
-**Status: IN PROGRESS.** `elbow_flex` and `shoulder_lift` are fully
-characterized and validated. `shoulder_pan`, `wrist_flex`, `wrist_roll`,
-and `gripper` are running on the `elbow_flex`-derived gain fit
-(`kp=400 kv=25`, applied to the whole `sts3215` actuator class) without
-their own hardware validation. This is the cheapest remaining phase — the
-tooling (`twin.py characterize`, `twin.py tune`, `twin.py analyze`)
-already exists end-to-end and just needs to be pointed at each remaining
-joint.
+**Status: DONE (2026-08-29).** All 6 joints — `elbow_flex`,
+`shoulder_lift`, `shoulder_pan`, `wrist_flex`, `wrist_roll`, `gripper` —
+are fully characterized and validated. `shoulder_pan` kept the shared
+`sts3215` class default (`kp=400 kv=25`); the other 4 non-original joints
+each carry their own per-joint `kp`/`kv` override in `so101_assets/so101.xml`
+(`elbow_flex` was the original fit target; `shoulder_lift` deliberately
+left unfitted per the backlash/compliance findings above).
 
-**Known risk already on record:** the gripper in particular has very
-different load/inertia characteristics than a rotating link joint, so
-reusing the elbow's fit for it is the least-safe of the four remaining
-assumptions.
+**`shoulder_pan` (2026-08-29):** backlash 0.381° — well below elbow's
+1.196° and the shoulder's 1.955°, consistent with it being a base rotation
+joint with less mechanical load path than a lever joint. Gravity fit
+failed (R² 0.236) as expected: it rotates about a vertical axis, so
+gravity droop shouldn't apply here the way it does to `elbow_flex`/
+`shoulder_lift`. `tune_actuator.py` confirmed the shared `kp=400 kv=25`
+fit is already near-optimal for this joint — its own sweep's best point
+improved the fit set 6% but made held-out error 8% *worse* (overfitting),
+so no gain change was applied. Sim-to-real RMSE 0.521° (whole dataset),
+in line with elbow's 0.434–0.638° range. Full numbers:
+`scripts/characterization/raw_data/shoulder_pan_*.csv`.
+
+**`wrist_flex` (2026-08-29):** backlash 1.134° (half-width 0.567°) —
+clearly dominant over gravity (verdict: "backlash dominates", 1.134° vs
+0.046°). Gravity fit also weak (R² 0.294) but for a different reason than
+shoulder_pan: this joint DOES pitch against gravity, but the settled error
+is small and fairly flat across all 7 rungs (+0.4 to +0.5°), consistent
+with a light gripper-only load rather than no gravity coupling at all.
+Unlike shoulder_pan, this joint's own gain fit was genuinely better and
+NOT overfitting: `tune_actuator.py` found `kp=20 kv=1`, confirmed as an
+interior minimum (checked by extending the sweep below the grid boundary,
+not just trusting the edge value), scoring 0.636°/0.577° fit/held-out vs
+the shared gains' 0.817°/0.730° (22%/21% better, held-out improving too).
+Applied as a per-joint override on `wrist_flex`'s `<position>` element in
+`so101_assets/so101.xml` — the `sts3215` class default (`kp=400 kv=25`)
+is unchanged and still applies to every other joint. All 4 scenes
+re-validated after the edit; `elbow_flex`/`shoulder_pan` replay RMSEs
+confirmed unaffected. Sim-to-real RMSE 0.601° (whole dataset, at the new
+gains). Full numbers: `scripts/characterization/raw_data/wrist_flex_*.csv`.
+
+**`wrist_roll` (2026-08-29):** fastest joint measured yet — 250.8°/s peak
+velocity (vs 130–190°/s for the others), consistent with it being a
+low-inertia axial-rotation joint like `shoulder_pan`, not a lever joint.
+Backlash 0.658° (half-width 0.329°), between shoulder_pan's 0.381° and
+wrist_flex's 1.134°. Gravity fit weak (R² 0.406, amplitude 0.070°) as
+expected — it rotates the gripper about its own long axis, so gravity
+coupling should be small, similar to shoulder_pan's story. Own gain fit
+genuinely better and not overfitting: `tune_actuator.py` found
+`kp=400 kv=35` (kp unchanged from the shared default, only kv moved),
+scoring 0.469°/0.591° fit/held-out vs the shared gains' 0.657°/0.633°
+(29%/7% better, held-out improving too). Applied as a per-joint `kv`
+override in `so101_assets/so101.xml`; all 4 scenes re-validated,
+`wrist_flex` replay RMSE confirmed unaffected. Sim-to-real RMSE 0.547°
+(whole dataset) — driven up mostly by the `ramp` run alone (RMSE 1.352°,
+every other run 0.36–0.83°), expected since `ramp` is the highest-velocity
+trajectory and isn't in the fit set, same "harder held-out set" pattern
+already seen with elbow_flex's staircases. Also reconfirms the known span
+mismatch: real calibrated 359.91° vs sim kinematic 314.42° (ratio 0.874,
+correctly not applied — continuous rotation has no real hard stop to
+match). Full numbers: `scripts/characterization/raw_data/wrist_roll_*.csv`.
+
+**`gripper` (2026-08-29) — required real code fixes, not just flags.**
+`so101_joint_characterization.py` and `backlash_probe.py` both hardcoded
+LeRobot's −100..100 normalisation for every joint, but the gripper is
+actually 0..100 with 0 = fully CLOSED (confirmed against LeRobot's own
+`so_follower.py` source and `check_pose.py`'s documented bug: the same
+wrong formula once reported −97.0 where the true value was +1.5). Fixed:
+`JointBus` now takes a `joint_name` and switches its tick↔norm formula for
+gripper; every `EXPERIMENTS` trajectory generator and `move_gently` call
+now centres on `GRIPPER_BASE=50` instead of the arm joints' 0; both
+scripts' safety clamps and `backlash_probe.py`'s `--lo`/`--hi` defaults
+are gripper-aware. Verified headlessly before touching hardware: non-gripper
+trajectories reproduce byte-identical to before, gripper trajectories stay
+in-bounds, all 4 scenes still load.
+
+**First hardware run surfaced a real mechanical finding.** With the initial
+`GRIPPER_SAFE_MAX=80`, `triangle` and `ramp` (which command up to base+30)
+drove the real jaw to a hard physical stop at **92.7° (~68 units)** every
+time — confirmed by eye against the hardware (photos), not an obstruction
+or damage, just the true open limit sitting short of what the calibration's
+`range_max` implies. The servo held there under real sustained load rather
+than reaching the commanded target, producing a bogus −6.96° "steady error"
+on `triangle` that was actually a stall, not backlash or gravity.
+`GRIPPER_SAFE_MAX` tightened 80→65 (comment left in
+`so101_joint_characterization.py` explaining why); every joint re-run
+clean, max actual position 88.6° across all 9 experiments, well clear of
+the stall. Backlash 0.821° (half-width 0.41°) — computed directly from
+`analyze_backlash.py`'s printed table since its gravity-fit block requires
+≥3 shared rungs and the narrower envelope leaves gripper with only 2; no
+gravity droop figure is available or expected to matter (pinch mechanism,
+not a lever against gravity). Own gain fit genuinely better and not
+overfitting: `kp=80 kv=6`, scoring 0.395°/0.533° fit/held-out vs the shared
+gains' 0.490°/0.603° (19%/12% better). Applied as a per-joint override;
+all 4 scenes re-validated, `wrist_roll`/`wrist_flex` replay RMSEs confirmed
+unaffected. Sim-to-real RMSE 0.465° (whole dataset). Full numbers:
+`scripts/characterization/raw_data/gripper_*.csv`.
 
 ### Phase B — Object/scene parity
 **Status: NOT STARTED.** No code in this repo reads a real object's
@@ -160,9 +323,8 @@ environments and compare, rather than trusting sim performance alone.
 
 ## 3. What to do next (recommended order, from the roadmap)
 
-1. **Characterize the remaining 4 joints** (Phase A) — cheapest, closes a
-   known gap, all tooling ready: `python scripts/twin.py characterize
-   --joint <name>` then `twin.py tune --joint <name>`.
+1. ~~Characterize the remaining 4 joints (Phase A)~~ — **DONE 2026-08-29**,
+   all 6 joints characterized and gain-fitted.
 2. **Start Phase B (object/scene parity)** — pick a sensing method
    (fiducial markers recommended as the cheapest reliable start), build the
    real→sim object pose bridge, validate headlessly first then visually —

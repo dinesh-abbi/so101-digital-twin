@@ -49,6 +49,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from so101_joint_characterization import (  # noqa: E402
     JointBus, move_gently, run_trajectory, SAFE_MIN, SAFE_MAX,
+    GRIPPER_BASE, GRIPPER_SAFE_MIN, GRIPPER_SAFE_MAX,
 )
 
 
@@ -81,10 +82,11 @@ def main():
     # (condition number 60), so noise decides the split. Over +/-50 units cos
     # changes by 0.45 and the condition number falls to 8.6. Hence the wide
     # default, still 10 units inside the +/-60 safe envelope.
-    ap.add_argument("--lo", type=float, default=-50.0,
-                    help="Lowest rung, normalised units (default -50)")
-    ap.add_argument("--hi", type=float, default=50.0,
-                    help="Highest rung (default +50)")
+    ap.add_argument("--lo", type=float, default=None,
+                    help="Lowest rung, normalised units "
+                         "(default -50, or 20 for the gripper - see --joint)")
+    ap.add_argument("--hi", type=float, default=None,
+                    help="Highest rung (default +50, or 80 for the gripper)")
     ap.add_argument("--step", type=float, default=12.5,
                     help="Rung spacing (default 12.5 -> 9 rungs, 7 both ways)")
     ap.add_argument("--hold", type=float, default=1.6,
@@ -107,12 +109,23 @@ def main():
     if args.joint not in cal:
         sys.exit(f"joint '{args.joint}' not in calibration. Have: {list(cal)}")
 
-    if args.lo < SAFE_MIN or args.hi > SAFE_MAX:
+    is_gripper = args.joint == "gripper"
+    # gripper is 0..100 with 0 = fully CLOSED, not a symmetric -100..100
+    # midpoint like every other joint, so it gets its own default rungs and
+    # envelope (centred on GRIPPER_BASE=50) rather than the arm joints' -50/50.
+    safe_min = GRIPPER_SAFE_MIN if is_gripper else SAFE_MIN
+    safe_max = GRIPPER_SAFE_MAX if is_gripper else SAFE_MAX
+    if args.lo is None:
+        args.lo = GRIPPER_SAFE_MIN if is_gripper else -50.0
+    if args.hi is None:
+        args.hi = GRIPPER_SAFE_MAX if is_gripper else 50.0
+
+    if args.lo < safe_min or args.hi > safe_max:
         sys.exit(f"requested {args.lo}..{args.hi} is outside the safe envelope "
-                 f"{SAFE_MIN}..{SAFE_MAX}")
+                 f"{safe_min}..{safe_max}")
 
     jc = cal[args.joint]
-    bus = JointBus(args.port, jc["id"], jc)
+    bus = JointBus(args.port, jc["id"], jc, joint_name=args.joint)
 
     wp = staircase(args.lo, args.hi, args.step, args.hold)
     rungs = sorted({w[0] for w in wp})
@@ -164,7 +177,7 @@ def main():
             )
 
         print("\n  Returning to the midpoint...")
-        move_gently(bus, 0.0)
+        move_gently(bus, bus.base_norm)
     except KeyboardInterrupt:
         print("\n\n  Interrupted - releasing torque.")
     finally:

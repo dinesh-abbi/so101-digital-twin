@@ -38,10 +38,15 @@ Usage
     python m6_keyboard_real.py --joints all
 
 Controls (only while the focus-gated window is in front):
-    Q/A shoulder_pan    W/S shoulder_lift   E/D elbow_flex
-    R/F wrist_flex      T/G wrist_roll      Y/H gripper
+    Q/A shoulder_pan    W/S or E/D elbow_flex    Up/Down shoulder_lift
+    R/F wrist_flex      T/G wrist_roll           Y/H gripper
     Esc  quit (always works, gate or no gate)
     Space  return live joints to their start pose, gently
+
+    NOTE (2026-08-29): shoulder_lift is temporarily on Up/Down, not W/S,
+    because its -1 direction does not move the real servo - see the KEYMAP
+    comment below and docs/PROJECT_STATUS.md. Down currently does nothing
+    on shoulder_lift; Up still works. Revert once that's fixed.
 
 Holding a key ramps the target continuously; a tap nudges it once.
 """
@@ -58,12 +63,29 @@ sys.path.insert(0, str(Path(__file__).parent / "digital_twin_env" / "robot_keybo
 JOINT_ORDER = ["shoulder_pan", "shoulder_lift", "elbow_flex",
                "wrist_flex", "wrist_roll", "gripper"]
 
-# key -> (joint, direction). Same layout as M5 so the muscle memory carries.
+# key -> (joint, direction). NOT the same layout as M5 (see 2026-08-29 note).
+#
+# 2026-08-29: shoulder_lift's -1 direction does not move the real servo
+# through this control loop, confirmed multiple ways - --debug-joint shows
+# target counting down correctly every tick while actual position never
+# changes, including across a 15-20s continuous hold (rules out a rate/
+# threshold issue, this is a hard block not a slow response). Ruled out:
+# firmware position limits (a fresh lerobot-calibrate resynced Min/Max_
+# Position_Limit and the issue persisted), a stuck/jammed joint (moves
+# freely both ways by hand), and a leash/software bug (a raw, single
+# low-level Goal_Position write in the -1 direction DID move it). Root
+# cause still open - see PROJECT_STATUS.md.
+#
+# shoulder_lift moved to up/down (off elbow_flex, which used to own those)
+# so its still-working +1 direction has a dedicated, memorable key even
+# though -1 is currently broken; w/s took over elbow_flex so nothing lost
+# its keys. Revert this whole rebinding once shoulder_lift's -1 direction
+# is fixed - there is no reason for the layout to differ from M5 otherwise.
 KEYMAP = {
     "q": ("shoulder_pan", +1), "a": ("shoulder_pan", -1),
-    "w": ("shoulder_lift", +1), "s": ("shoulder_lift", -1),
+    "w": ("elbow_flex", +1), "s": ("elbow_flex", -1),
     "e": ("elbow_flex", +1), "d": ("elbow_flex", -1),
-    "up": ("elbow_flex", +1), "down": ("elbow_flex", -1),
+    "up": ("shoulder_lift", +1), "down": ("shoulder_lift", -1),
     "r": ("wrist_flex", +1), "f": ("wrist_flex", -1),
     "t": ("wrist_roll", +1), "g": ("wrist_roll", -1),
     "y": ("gripper", +1), "h": ("gripper", -1),
@@ -72,6 +94,16 @@ KEYMAP = {
 # Normalised units. The characterisation runs used +/-60 and never came near
 # a hard stop; 50 leaves more room since a human is driving.
 SAFE_LIMIT = 50.0
+
+# 2026-08-29 characterisation found the real gripper's true open limit is
+# ~68 normalised units (92.7 deg), short of the calibration's 100 - past
+# that the servo stalls against a hard mechanical stop under real load
+# instead of reaching the target. Matches GRIPPER_MIN/MAX in
+# m7_mirror_sim.py and GRIPPER_SAFE_MIN/MAX in
+# so101_joint_characterization.py; keep all three in sync if any change.
+GRIPPER_MIN = 20.0
+GRIPPER_MAX = 65.0
+GRIPPER_BASE = 40.0  # comfortably inside GRIPPER_MIN..MAX, used by --recover
 
 # Per-command clamp enforced inside LeRobot, in normalised units: every
 # command is limited to this much motion from the arm's MEASURED position.
@@ -127,7 +159,7 @@ def build_parser():
                     help=f"Per-command motion clamp (default {MAX_RELATIVE_TARGET})")
     ap.add_argument("--debug-joint", default=None,
                     help="Log every control tick for this joint to a CSV "
-                         "(tick,key_held,pre_leash_target,post_leash_target,"
+                         "(tick,key_held,keys,pre_leash_target,post_leash_target,"
                          "actual,leash_clamped). Diagnostic only, no effect "
                          "on control.")
     ap.add_argument("--recover", action="store_true",
@@ -318,7 +350,12 @@ def main():
             robot.config.max_relative_target = recover_clamp
             reach = recover_clamp * 0.8
             for j in recover_order:
-                goal = 0.0
+                # gripper's 0 is fully CLOSED, not a safe midpoint like every
+                # other joint's 0 - recovering it to 0 would "succeed" by
+                # this loop's own arrival test while leaving it outside
+                # GRIPPER_SAFE_MIN..MAX for anything that checks that range
+                # (e.g. m7_mirror_sim.py's pre-flight check).
+                goal = GRIPPER_BASE if j == "gripper" else 0.0
                 print(f"    {j:15s} {start[j]:+7.1f} -> {goal:+.1f} ",
                       end="", flush=True)
                 stalled = 0
@@ -365,7 +402,7 @@ def main():
         keys.start()
 
         print("\n  " + "-" * 66)
-        print("  Q/A pan   W/S lift   E/D elbow (or Up/Down)   R/F wristflex   T/G roll   Y/H grip")
+        print("  Q/A pan   W/S or E/D elbow   Up/Down lift (temp - see note above)   R/F wristflex   T/G roll   Y/H grip")
         print("  Space = back to start pose      Esc = quit")
         if args.require_focus:
             print(f"  Keys act ONLY while a '{args.require_focus}' window is focused.")
@@ -382,7 +419,7 @@ def main():
             debug_path = Path(f"debug_{args.debug_joint}.csv")
             debug_log = open(debug_path, "w", newline="")
             debug_writer = csv.writer(debug_log)
-            debug_writer.writerow(["tick", "key_held", "pre_leash_target",
+            debug_writer.writerow(["tick", "key_held", "keys", "pre_leash_target",
                                    "post_leash_target", "actual", "leash_clamped"])
             print(f"  --debug-joint: logging '{args.debug_joint}' to {debug_path}")
         live_obs = None
@@ -455,10 +492,13 @@ def main():
 
             debug_pre_leash = target.get(args.debug_joint) if args.debug_joint else None
             debug_key_held = None
+            debug_keys = ""
             if args.debug_joint:
-                debug_key_held = any(
-                    KEYMAP.get(n, (None,))[0] == args.debug_joint
-                    for n in keys.snapshot_held(KEY_DECAY_S))
+                held_for_joint = [
+                    n for n in keys.snapshot_held(KEY_DECAY_S)
+                    if KEYMAP.get(n, (None,))[0] == args.debug_joint]
+                debug_key_held = bool(held_for_joint)
+                debug_keys = "+".join(sorted(held_for_joint))
 
             if live_obs is not None:
                 leash = args.max_relative_target * 0.9
@@ -468,14 +508,26 @@ def main():
                         continue
                     target[j] = max(now - leash, min(now + leash, target[j]))
 
-            robot.send_action({f"{j}.pos": target[j] for j in JOINT_ORDER})
+            sent = robot.send_action({f"{j}.pos": target[j] for j in JOINT_ORDER})
+            # 2026-08-29: confirmed sent == requested on every tick during
+            # the shoulder_lift -1 investigation (see PROJECT_STATUS.md) -
+            # send_action's own max_relative_target clamp is NOT silently
+            # rewriting the target. Left here, gated on debug_joint, in case
+            # that ever needs re-checking rather than re-deriving from
+            # scratch.
+            if args.debug_joint and debug_key_held:
+                requested = target.get(args.debug_joint)
+                actually_sent = sent.get(f"{args.debug_joint}.pos")
+                if actually_sent is not None and abs(actually_sent - requested) > 1e-6:
+                    print(f"    send_action REWROTE the target: "
+                          f"requested={requested} sent={actually_sent}")
 
             if debug_writer is not None and args.debug_joint in live:
                 actual = live_obs.get(args.debug_joint) if live_obs else None
                 post_leash = target.get(args.debug_joint)
                 clamped = (debug_pre_leash is not None and post_leash is not None
                           and abs(debug_pre_leash - post_leash) > 1e-9)
-                debug_writer.writerow([f"{tick:.3f}", debug_key_held,
+                debug_writer.writerow([f"{tick:.3f}", debug_key_held, debug_keys,
                                        f"{debug_pre_leash:.3f}" if debug_pre_leash is not None else "",
                                        f"{post_leash:.3f}" if post_leash is not None else "",
                                        f"{actual:.3f}" if actual is not None else "",

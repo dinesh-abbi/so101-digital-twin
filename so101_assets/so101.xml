@@ -323,8 +323,26 @@
     <position class="sts3215" name="shoulder_pan" joint="shoulder_pan" ctrlrange="-1.91986 1.91986"/>
     <position class="sts3215" name="shoulder_lift" joint="shoulder_lift" ctrlrange="-1.74533 1.74533"/>
     <position class="sts3215" name="elbow_flex" joint="elbow_flex" ctrlrange="-1.69 1.69"/>
-    <position class="sts3215" name="wrist_flex" joint="wrist_flex" ctrlrange="-1.65806 1.65806"/>
-    <position class="sts3215" name="wrist_roll" joint="wrist_roll" ctrlrange="-2.74385 2.84121"/>
-    <position class="sts3215" name="gripper" joint="gripper" ctrlrange="-0.17453 1.74533"/>
+    <!-- Own fit (2026-08-29), not the sts3215 class default: kp=20 kv=25 on
+         this low-inertia joint overshot and rang, RMSE 0.817 fit / 0.730
+         held-out. tune_actuator.py --joint wrist_flex found kp=20 kv=1 -
+         confirmed an interior minimum, not a sweep-boundary artifact -
+         scoring 0.636 fit / 0.577 held-out (22%/21% better, held-out
+         improving too rules out overfitting). -->
+    <position class="sts3215" name="wrist_flex" joint="wrist_flex" ctrlrange="-1.65806 1.65806" kp="20" kv="1"/>
+    <!-- Own fit (2026-08-29): kv=35 vs the sts3215 class default kv=25,
+         kp unchanged at 400. tune_actuator.py --joint wrist_roll: 0.469
+         fit / 0.591 held-out vs 0.657 / 0.633 shared (29%/7% better,
+         held-out improving too rules out overfitting). -->
+    <position class="sts3215" name="wrist_roll" joint="wrist_roll" ctrlrange="-2.74385 2.84121" kv="35"/>
+    <!-- Own fit (2026-08-29), not the sts3215 class default: characterisation
+         found the real jaw's true open limit (~68 units, 92.7 deg) is short
+         of the calibration's range_max, so GRIPPER_SAFE_MAX in
+         so101_joint_characterization.py was tightened 80->65 to avoid
+         stalling the servo against its hard stop. tune_actuator.py --joint
+         gripper: kp=80 kv=6 scores 0.395 fit / 0.533 held-out vs the shared
+         gains' 0.490 / 0.603 (19%/12% better, held-out improving too rules
+         out overfitting). -->
+    <position class="sts3215" name="gripper" joint="gripper" ctrlrange="-0.17453 1.74533" kp="80" kv="6"/>
   </actuator>
 </mujoco>

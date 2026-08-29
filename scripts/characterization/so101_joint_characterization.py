@@ -59,8 +59,20 @@ TICKS_PER_REV = 4096.0
 
 # Keep well clear of the calibrated extremes: a joint driven into its hard
 # stop stalls and heats, and the resulting data is meaningless anyway.
+# The gripper is normalised 0..100 with 0 = fully CLOSED, not a symmetric
+# midpoint like every other joint's -100..100 - so it gets its own base
+# (50, its actual middle) and envelope, both narrower than the arm joints'
+# since 100 units there is a much smaller physical travel.
 SAFE_MIN = -60.0
 SAFE_MAX = 60.0
+GRIPPER_BASE = 50.0
+GRIPPER_SAFE_MIN = 20.0
+# 2026-08-29: triangle/ramp commanding 80 units (109.6 deg) stalled the real
+# jaw at a hard mechanical open limit around 92.7 deg (~68 units) every time -
+# confirmed by hand/eye against the hardware, not a script bug or obstruction.
+# The calibration's range_max sits past the jaw's true travel. 65 keeps a
+# margin below the observed 68-unit stall point.
+GRIPPER_SAFE_MAX = 65.0
 
 # Sampling. The serial round-trip dominates, not the sleep, so the loop reads
 # as fast as the bus allows and records the real elapsed time per sample.
@@ -77,7 +89,7 @@ class JointBus:
     temperature, and needs writes that retry.
     """
 
-    def __init__(self, port_name, motor_id, cal, baudrate=1_000_000):
+    def __init__(self, port_name, motor_id, cal, baudrate=1_000_000, joint_name=None):
         from scservo_sdk import PortHandler, PacketHandler, COMM_SUCCESS
 
         self._COMM_SUCCESS = COMM_SUCCESS
@@ -87,6 +99,17 @@ class JointBus:
         self.span = self.range_max - self.range_min
         if self.span <= 0:
             raise ValueError("calibration span is zero or inverted")
+        # gripper is normalised 0..100 (LeRobot's RANGE_0_100), every other
+        # joint is -100..100 (RANGE_M100_100) - see check_pose.py's docstring
+        # for the bug this avoids: the -100..100 formula on a 0..100 joint
+        # reported -97.0 where the true value was +1.5, a bottom-of-range
+        # reading that looked identical to a near-top one.
+        self.norm_width = 100.0 if joint_name == "gripper" else 200.0
+        self.norm_offset = 0.0 if joint_name == "gripper" else 100.0
+        self.is_gripper = joint_name == "gripper"
+        self.base_norm = GRIPPER_BASE if self.is_gripper else 0.0
+        self.safe_min = GRIPPER_SAFE_MIN if self.is_gripper else SAFE_MIN
+        self.safe_max = GRIPPER_SAFE_MAX if self.is_gripper else SAFE_MAX
 
         self.port = PortHandler(port_name)
         self.packet = PacketHandler(0)  # protocol_end=0, STS/SMS little-endian
@@ -98,15 +121,16 @@ class JointBus:
 
     # --- unit conversion ----------------------------------------------------
     def ticks_to_norm(self, ticks):
-        """Raw encoder ticks -> LeRobot's -100..100 normalised value."""
-        return (ticks - self.range_min) / self.span * 200.0 - 100.0
+        """Raw encoder ticks -> LeRobot's normalised value (-100..100, or
+        0..100 for the gripper - see norm_width/norm_offset in __init__)."""
+        return (ticks - self.range_min) / self.span * self.norm_width - self.norm_offset
 
     def norm_to_ticks(self, norm):
-        return int(round((norm + 100.0) / 200.0 * self.span + self.range_min))
+        return int(round((norm + self.norm_offset) / self.norm_width * self.span + self.range_min))
 
     def norm_to_deg(self, norm):
         """Normalised units -> degrees of this joint's calibrated travel."""
-        return norm / 200.0 * (self.span / TICKS_PER_REV * 360.0)
+        return norm / self.norm_width * (self.span / TICKS_PER_REV * 360.0)
 
     # --- reads --------------------------------------------------------------
     def _read(self, addr, nbytes):
@@ -179,8 +203,8 @@ class JointBus:
         return self._write(ADDR_TORQUE_ENABLE, 1, 1 if on else 0)
 
     def set_goal_norm(self, norm):
-        """Command a target, clamped to the safe envelope."""
-        norm = max(SAFE_MIN, min(SAFE_MAX, norm))
+        """Command a target, clamped to this joint's own safe envelope."""
+        norm = max(self.safe_min, min(self.safe_max, norm))
         return self._write(ADDR_GOAL_POSITION, 2, self.norm_to_ticks(norm)), norm
 
     def close(self):
@@ -275,32 +299,42 @@ def run_trajectory(bus, waypoints, out_path, experiment_id, load_condition,
 
 
 # --- experiment definitions -------------------------------------------------
-# Centred on 0 (the calibrated midpoint) rather than an absolute 30-60 deg, so
+# Centred on `base` (0 for every joint except the gripper, which is centred
+# on GRIPPER_BASE=50 since its 0 is the fully-closed end, not a midpoint) so
 # the envelope stays symmetric and well inside the limits for any arm.
 
-def steps(size):
-    """Ten repeats of a step of `size`, returning to base each time."""
+def steps(size, base=0.0):
+    """Ten repeats of a step of `size` above `base`, returning to base each time."""
     wp = []
     for _ in range(10):
-        wp.append((0.0, 1.2))
-        wp.append((size, 1.2))
+        wp.append((base, 1.2))
+        wp.append((base + size, 1.2))
     return wp
 
 
+def reverse(base=0.0):
+    return [(base, 1.5), (base + 15.0, 1.5), (base, 1.5),
+            (base + 15.0, 1.5), (base, 1.5), (base + 15.0, 1.5), (base, 1.5)]
+
+
+def ramp(base=0.0):
+    return ([(base + v, 0.25) for v in range(-30, 31, 2)] +      # slow
+            [(base + v, 0.12) for v in range(30, -31, -4)] +     # medium
+            [(base + v, 0.06) for v in range(-30, 31, 8)])       # fast
+
+
+def triangle(base=0.0):
+    return [(base, 1.0), (base + 30.0, 1.6), (base, 1.6),
+            (base + 30.0, 1.6), (base, 1.6), (base + 30.0, 1.6), (base, 1.6)]
+
+
 EXPERIMENTS = {
-    "step_5":   (lambda: steps(5.0),  "step_5deg",  "small step, 10 repeats"),
-    "step_10":  (lambda: steps(10.0), "step_10deg", "medium step, 10 repeats"),
-    "step_20":  (lambda: steps(20.0), "step_20deg", "large step, 10 repeats"),
-    "reverse":  (lambda: [(0.0, 1.5), (15.0, 1.5), (0.0, 1.5),
-                          (15.0, 1.5), (0.0, 1.5), (15.0, 1.5), (0.0, 1.5)],
-                 "reverse", "direction reversals - backlash and deadband"),
-    "ramp":     (lambda: ([(v, 0.25) for v in range(-30, 31, 2)] +      # slow
-                          [(v, 0.12) for v in range(30, -31, -4)] +     # medium
-                          [(v, 0.06) for v in range(-30, 31, 8)]),      # fast
-                 "ramp", "ramps at three speeds - velocity ceiling"),
-    "triangle": (lambda: [(0.0, 1.0), (30.0, 1.6), (0.0, 1.6),
-                          (30.0, 1.6), (0.0, 1.6), (30.0, 1.6), (0.0, 1.6)],
-                 "triangle", "triangle wave - lag and reversal rounding"),
+    "step_5":   (lambda base: steps(5.0, base),  "step_5deg",  "small step, 10 repeats"),
+    "step_10":  (lambda base: steps(10.0, base), "step_10deg", "medium step, 10 repeats"),
+    "step_20":  (lambda base: steps(20.0, base), "step_20deg", "large step, 10 repeats"),
+    "reverse":  (reverse, "reverse", "direction reversals - backlash and deadband"),
+    "ramp":     (ramp, "ramp", "ramps at three speeds - velocity ceiling"),
+    "triangle": (triangle, "triangle", "triangle wave - lag and reversal rounding"),
 }
 
 
@@ -339,11 +373,12 @@ def main():
     print(f"  calibration    : {args.id}")
     print(f"  load condition : {args.load_condition}")
 
-    bus = JointBus(args.port, jc["id"], jc)
+    bus = JointBus(args.port, jc["id"], jc, joint_name=args.joint)
     deg_per_unit = bus.norm_to_deg(1.0)
     print(f"  1 unit         = {deg_per_unit:.4f} deg of calibrated travel")
-    print(f"  safe envelope  : {SAFE_MIN:+.0f} .. {SAFE_MAX:+.0f} units "
-          f"({bus.norm_to_deg(SAFE_MIN):+.0f} .. {bus.norm_to_deg(SAFE_MAX):+.0f} deg)")
+    print(f"  safe envelope  : {bus.safe_min:+.0f} .. {bus.safe_max:+.0f} units "
+          f"({bus.norm_to_deg(bus.safe_min):+.0f} .. {bus.norm_to_deg(bus.safe_max):+.0f} deg)"
+          + ("  (0..100 scale, base 50)" if bus.is_gripper else ""))
 
     st = bus.read_state()
     if st["ticks"] is None:
@@ -366,15 +401,15 @@ def main():
             sys.exit("could not enable torque")
 
         print("  Moving gently to the start pose...")
-        move_gently(bus, 0.0)
+        move_gently(bus, bus.base_norm)
 
         for name in todo:
             builder, fname, desc = EXPERIMENTS[name]
             print(f"\n  [{name}] {desc}")
-            move_gently(bus, 0.0)
+            move_gently(bus, bus.base_norm)
             run_trajectory(
                 bus,
-                builder(),
+                builder(bus.base_norm),
                 out_dir / f"{args.joint}_{fname}_{args.load_condition}.csv",
                 experiment_id=name,
                 load_condition=args.load_condition,
@@ -383,7 +418,7 @@ def main():
             )
 
         print("\n  Returning to the midpoint...")
-        move_gently(bus, 0.0)
+        move_gently(bus, bus.base_norm)
 
     except KeyboardInterrupt:
         print("\n\n  Interrupted - releasing torque.")

@@ -99,11 +99,28 @@ CONTROL_HZ = 20.0
 STEP_PER_TICK = 0.25
 KEY_DECAY_S = 0.6
 
+# 2026-08-29 characterisation found the real gripper's true open limit is
+# ~68 normalised units (92.7 deg), short of the calibration's 100 - past
+# that the servo stalls against a hard mechanical stop under real load
+# instead of reaching the target. Mirrors GRIPPER_SAFE_MAX in
+# so101_joint_characterization.py; keep both in sync if either changes.
+GRIPPER_MIN = 20.0
+GRIPPER_MAX = 65.0
+
+# 2026-08-29: shoulder_lift's -1 direction does not move the real servo
+# through this control loop - see the matching note in m6_keyboard_real.py
+# for what was ruled out (firmware limits, jam, leash/software bug, a
+# rate/threshold issue - a 15-20s continuous hold never moved it either)
+# and what's still open. shoulder_lift moved to up/down so its still-
+# working +1 direction has a dedicated key; w/s took over elbow_flex (off
+# up/down) so nothing lost its keys. Revert this whole rebinding once
+# shoulder_lift's -1 direction is fixed - no reason for the layout to
+# differ from M5/M6 otherwise.
 KEYMAP = {
     "q": ("shoulder_pan", +1), "a": ("shoulder_pan", -1),
-    "w": ("shoulder_lift", +1), "s": ("shoulder_lift", -1),
+    "w": ("elbow_flex", +1), "s": ("elbow_flex", -1),
     "e": ("elbow_flex", +1), "d": ("elbow_flex", -1),
-    "up": ("elbow_flex", +1), "down": ("elbow_flex", -1),
+    "up": ("shoulder_lift", +1), "down": ("shoulder_lift", -1),
     "r": ("wrist_flex", +1), "f": ("wrist_flex", -1),
     "t": ("wrist_roll", +1), "g": ("wrist_roll", -1),
     "y": ("gripper", +1), "h": ("gripper", -1),
@@ -211,6 +228,7 @@ def main():
 
     robot = None
     keys = None
+    record_file = None
 
     try:
         # ---- Source setup -------------------------------------------------
@@ -241,9 +259,14 @@ def main():
         for j in JOINT_NAMES:
             flag = "  <- LIVE" if j in live else ""
             warn = ""
-            # The gripper is 0..100, so the +/-SAFE_LIMIT test does not
-            # apply to it the way it does to the arm joints.
-            if j != "gripper" and abs(start[j]) > args.safe_limit:
+            # The gripper is 0..100 (its own GRIPPER_MIN..MAX), so the
+            # +/-SAFE_LIMIT test does not apply to it the way it does to the
+            # arm joints.
+            if j == "gripper":
+                if not (GRIPPER_MIN <= start[j] <= GRIPPER_MAX):
+                    warn = f"   *** OUTSIDE {GRIPPER_MIN:.0f}..{GRIPPER_MAX:.0f} ***"
+                    outside.append(j)
+            elif abs(start[j]) > args.safe_limit:
                 warn = f"   *** OUTSIDE +/-{args.safe_limit:.0f} ***"
                 outside.append(j)
             print(f"    {j:15s} {start[j]:+7.1f}{flag}{warn}")
@@ -277,7 +300,7 @@ def main():
         keys.start()
 
         print("\n  " + "-" * 66)
-        print("  Q/A pan   W/S lift   E/D elbow (or Up/Down)   R/F wristflex   T/G roll   Y/H grip")
+        print("  Q/A pan   W/S or E/D elbow   Up/Down lift (temp - see KEYMAP note)   R/F wristflex   T/G roll   Y/H grip")
         print("  Esc = quit")
         if args.source == "real":
             print(f"  Keys act ONLY while a '{args.require_focus}' window is focused.")
@@ -324,7 +347,7 @@ def main():
                         continue
                     v = target[joint] + direction * args.step
                     if joint == "gripper":
-                        target[joint] = max(0.0, min(100.0, v))
+                        target[joint] = max(GRIPPER_MIN, min(GRIPPER_MAX, v))
                     else:
                         target[joint] = max(-args.safe_limit,
                                             min(args.safe_limit, v))

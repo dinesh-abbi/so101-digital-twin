@@ -96,8 +96,8 @@ change and the `gripperframe` quaternion fix (`1 0 1 0` → `0 0 1 0`).
 | M6-prep | Real↔sim mapping math (`real_sim_mapping_test/real_sim_joint_mapping.py`) | DONE, unit tested — `validate_real_sim_mapping.py` |
 | M6 | Keyboard → real follower arm (`m6_keyboard_real.py`) | DONE, validated on hardware |
 | M7 | Keyboard → real follower + MuJoCo together (`m7_mirror_sim.py`) | DONE, validated on hardware |
-| Task 1 | Real joint characterisation | DONE for `elbow_flex` + `shoulder_lift` (2026-08-26) — `scripts/characterization/RESULTS.md`. **NOT done** for `shoulder_pan`, `wrist_flex`, `wrist_roll`, `gripper` |
-| Task 2 | Replay real trajectories in sim, fit the model | DONE for `elbow_flex` (2026-08-26) — sim RMSE 1.254° → 0.434°, gains applied to the shared `sts3215` class |
+| Task 1 | Real joint characterisation | DONE for all 6 joints. `elbow_flex` + `shoulder_lift` on 2026-08-26 — `scripts/characterization/RESULTS.md`. `shoulder_pan`, `wrist_flex`, `wrist_roll`, `gripper` on 2026-08-29 — `docs/PROJECT_STATUS.md` §Phase A |
+| Task 2 | Replay real trajectories in sim, fit the model | DONE for all 6 joints. `elbow_flex` fitted 2026-08-26 (sim RMSE 1.254°→0.434°) and applied to the shared `sts3215` class; `shoulder_lift` and `shoulder_pan` kept the shared fit (their own sweeps did not improve held-out error); `wrist_flex` (kp=20 kv=1), `wrist_roll` (kv=35), `gripper` (kp=80 kv=6) each got a validated per-joint override in `so101_assets/so101.xml` on 2026-08-29 — see `docs/PROJECT_STATUS.md` §Phase A |
 | `twin.py` | Unified CLI dispatcher (subcommands + interactive menu) for every script below | DONE — `python scripts\twin.py` |
 
 Full phase-by-phase breakdown (including everything past M7 — object/scene
@@ -221,6 +221,14 @@ against a superseded calibration.
 - Backlash is **unmeasured, not absent**. Every experiment steps up from 0
   and back down to 0, so no command is settled from both directions. Do not
   cite "no hysteresis" as a result. Repeatability sd 0.088° bounds it.
+- **The gripper's true fully-open limit is ~68 normalised units (92.7°),
+  short of the calibration's `range_max`** (2026-08-29, confirmed visually
+  against hardware — a hard mechanical stop, not damage or an obstruction).
+  Commanding past it stalls the servo under real sustained load instead of
+  reaching the target, which reads as a huge false "steady-state error" if
+  not caught. `GRIPPER_SAFE_MAX` in `so101_joint_characterization.py` is
+  65, deliberately short of 68 — do not raise it without re-checking this
+  limit by hand first.
 
 ## Windows validation results (measured 2026-08-25, not assumed)
 
@@ -460,12 +468,20 @@ cd scripts\digital_twin_env\robot_keyboard_test & ..\..\..\.venv\Scripts\python.
 ..\.venv\Scripts\python.exe scripts\m7_mirror_sim.py --source real --joints elbow_flex
 ```
 
-Keyboard controls (M5/M6/M7 all share this scheme): `Q/A W/S E/D R/F T/G
-Y/H` for the 6 joints ±, `Space` reset, `Esc` quit. M5 (sim-only) moves
-0.1° per simulation step. M6/M7 (real hardware) move ~5 units/s while a key
-is held, clamped to `±SAFE_LIMIT` (50 normalized units) and to LeRobot's
-`max_relative_target` per-command clamp — see M6/M7's own docstrings for
-the full safety-layer breakdown, not repeated here.
+Keyboard controls: M5 (sim-only) uses `Q/A W/S E/D R/F T/G Y/H` for the 6
+joints ±, `Space` reset, `Esc` quit, moving 0.1° per simulation step.
+
+**M6/M7 (real hardware) currently use a DIFFERENT layout**, temporarily:
+`Q/A` shoulder_pan, `W/S` **or** `E/D` elbow_flex, `Up/Down` shoulder_lift,
+`R/F` wrist_flex, `T/G` wrist_roll, `Y/H` gripper, `Space` reset, `Esc`
+quit. This diverges from M5 only because `shoulder_lift`'s `-1` direction
+does not move the real servo (open issue, 2026-08-29 — see
+`docs/PROJECT_STATUS.md`); `Down` on shoulder_lift currently does nothing.
+Revert to the M5 layout once that's fixed. Real-hardware moves are ~5
+units/s while a key is held, clamped to `±SAFE_LIMIT` (50 normalized
+units) and to LeRobot's `max_relative_target` per-command clamp — see
+M6/M7's own docstrings for the full safety-layer breakdown, not repeated
+here.
 
 ## Real hardware safety, in one place
 

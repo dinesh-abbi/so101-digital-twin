@@ -210,6 +210,17 @@ def cmd_calibrate(args):
     import shutil
     exe = shutil.which("lerobot-calibrate")
     if exe is None:
+        # shutil.which() only searches the PATH env var, which does not
+        # include a venv's own Scripts/ folder unless the venv was
+        # "activated" in this shell. Every command here is instead invoked
+        # via the venv's python.exe directly (an absolute path, per this
+        # project's own convention - see CLAUDE.md), so the console script
+        # sits right next to sys.executable even though PATH never mentions
+        # it. Check there before giving up.
+        candidate = Path(sys.executable).parent / "lerobot-calibrate.exe"
+        if candidate.exists():
+            exe = str(candidate)
+    if exe is None:
         sys.exit(
             "lerobot-calibrate not found on PATH.\n"
             "M6/M7 dependencies are not installed in this venv yet - run:\n"
