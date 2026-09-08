@@ -257,6 +257,14 @@ Read from the compiled model, not hardcoded:
 
 ## Working with real hardware (M6 / M7)
 
+> **Driving the follower from a real leader arm instead of the keyboard?**
+> See **[docs/LEADER_TELEOP_RUNBOOK.md](docs/LEADER_TELEOP_RUNBOOK.md)** —
+> the end-to-end procedure (find ports → calibrate both arms → recover into
+> the safe envelope → leader + follower + sim together), what the real/sim
+> lag actually is and why most of it is correct, what to change when the
+> arms or the table are swapped, and a failure-symptom table. This section
+> below covers keyboard control (M6/M7); the runbook covers leader teleop.
+
 > **⚠️ Safety.** `m6_keyboard_real.py` and `m7_mirror_sim.py` gate every key
 > behind a focus check — by default keys act only while the window that was
 > focused when the script started stays focused (auto-detected; override

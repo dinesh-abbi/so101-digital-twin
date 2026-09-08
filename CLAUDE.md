@@ -28,6 +28,13 @@ machine has since built substantially past it (M6, M7, Task 1/2,
   results, a ROS/Gazebo comparison, validation record, and the leader-arm
   plan — written for mentor/regular/deep-technical readers alike
 - `docs/PROJECT_STATUS.md` — current milestone + phase status, what's left
+- `docs/LEADER_TELEOP_RUNBOOK.md` — **the operational procedure for leader →
+  follower → sim**: port discovery, calibrating both arms (including the
+  `so101_leader` vs `so_leader` CLI trap and how to spot a bad sweep),
+  recovering into the safe envelope, running all three together, why the
+  real/sim lag is mostly correct, what changes when arms or the table are
+  swapped, and a symptom→cause table. Written from the session where each
+  of those failure modes actually happened
 - `docs/MOTOR_CHECK_AND_MAPPING_SIMPLE.md` — per-motor table (all 6 IDs,
   ranges, which have been behavior-tested), simple explanation first
 - `docs/REAL_SIM_MAPPING_DEEP_DIVE.md` — full technical writeup of the

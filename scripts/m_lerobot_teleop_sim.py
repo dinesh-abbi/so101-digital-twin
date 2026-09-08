@@ -69,10 +69,24 @@ Usage
 """
 
 import argparse
+import logging
 import math
 import sys
 import time
 from pathlib import Path
+
+# LeRobot's ensure_safe_goal_position (robots/utils.py) logs a
+# logging.warning() on every single control tick the per-command clamp
+# actually engages -- not once per episode. At 30+ Hz, a leader movement
+# that legitimately outruns the clamp (e.g. a fast hand motion against
+# wrist_flex's tight max-relative-target) floods the console with dozens
+# of multi-line warnings per second. Windows console writes are
+# synchronous, so that much output starves the loop of wall-clock time and
+# the mirrored sim appears completely frozen even though mj_step/
+# viewer.sync() are still being called -- not a bug in the mirroring code,
+# a side effect of unthrottled per-tick logging. The clamp itself stays
+# fully active; only the repeated log line is silenced.
+logging.getLogger().setLevel(logging.ERROR)
 
 _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE / "digital_twin_env" / "real_sim_mapping_test"))
@@ -151,6 +165,12 @@ def parse_args():
                          "where the scene puts it (how the sim looked before "
                          "corner placement was added). Cosmetic only -- joint "
                          "mapping is unaffected either way.")
+    ap.add_argument("--debug-track", action="store_true",
+                    help="Print real/ctrl/qpos for elbow_flex every 10 "
+                         "ticks. Use when the sim looks frozen or out of "
+                         "sync -- it separates a mapping problem (ctrl "
+                         "frozen) from a stuck sim (qpos frozen) from a "
+                         "rendering problem (both move, window static).")
     ap.add_argument("--no-sim", action="store_true",
                     help="Skip the MuJoCo window; control only.")
     return ap.parse_args()
@@ -233,12 +253,38 @@ def main():
             data.qpos[:6] = qpos
             data.ctrl[:6] = qpos
             mujoco.mj_forward(model, data)
+
+            # The real follower's rest pose is usually folded down, and the
+            # sim's base sits ON the tabletop -- so that same pose seeds the
+            # gripper INSIDE the table (measured: 38 contacts, up to 18 mm
+            # penetration). MuJoCo then spends the whole session pushing the
+            # jaw out of the table instead of tracking, and because teleop
+            # moves the target gradually the joint never gets a large enough
+            # command to break free: elbow_flex sat at +63 deg while ctrl
+            # asked for -95, looking exactly like "the sim is frozen".
+            # Warn rather than silently mistrack -- the fix is a starting
+            # pose whose gripper is clear of the table, which only the
+            # operator can set on the real arm.
+            if data.ncon > 0:
+                deepest = min(float(data.contact[i].dist)
+                              for i in range(data.ncon))
+                if deepest < -0.002:
+                    print(f"\n  WARNING: the sim starts in collision "
+                          f"({data.ncon} contacts, {abs(deepest) * 1000:.0f} mm "
+                          f"deep).")
+                    print("  The follower's current pose puts the gripper "
+                          "inside the tabletop, so")
+                    print("  the sim will fight the table instead of "
+                          "tracking. Lift the real arm")
+                    print("  clear of the table surface and restart.")
+
             viewer = mujoco.viewer.launch_passive(model, data)
 
         print("\n  Move the LEADER arm. Ctrl+C (or close the viewer) to quit.")
         print("  Keep a hand near the follower's power connector.\n")
 
         period = 1.0 / args.fps
+        tick_count = 0
         while True:
             loop_start = time.perf_counter()
 
@@ -278,6 +324,31 @@ def main():
                 for _ in range(sim_steps_per_frame):
                     mujoco.mj_step(model, data)
                 viewer.sync()
+
+            # --debug-track prints real / ctrl / qpos side by side. Without
+            # it the loop is a black box: "the sim is frozen" looks
+            # identical whether the mirror never wrote a target, the
+            # physics refused to follow one, or the window simply is not
+            # repainting. Those three have different fixes, and this is how
+            # you tell them apart -- it is what identified the sim gripper
+            # being wedged in the tabletop (ctrl tracking perfectly while
+            # qpos sat ~150 deg away). Off by default; the output is one
+            # line per 10 ticks and would otherwise bury real warnings.
+            tick_count += 1
+            if args.debug_track and tick_count % 10 == 0:
+                elbow = float(obs["elbow_flex.pos"])
+                if viewer is None:
+                    print(f"t{tick_count:5d} real{elbow:+7.1f} VIEWER=None",
+                          flush=True)
+                else:
+                    # ctrl is what we command the sim to; qpos is where it
+                    # actually got to. Printing both separates "the mirror
+                    # never wrote a target" from "it wrote one but the
+                    # physics did not follow".
+                    print(f"t{tick_count:5d} real{elbow:+7.1f} "
+                          f"ctrl{math.degrees(data.ctrl[2]):+7.1f} "
+                          f"qpos{math.degrees(data.qpos[2]):+7.1f} "
+                          f"run={viewer.is_running()}", flush=True)
 
             precise_sleep(max(period - (time.perf_counter() - loop_start), 0.0))
 
