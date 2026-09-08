@@ -38,15 +38,10 @@ Usage
     python m6_keyboard_real.py --joints all
 
 Controls (only while the focus-gated window is in front):
-    Q/A shoulder_pan    W/S or E/D elbow_flex    Up/Down shoulder_lift
-    R/F wrist_flex      T/G wrist_roll           Y/H gripper
+    Q/A shoulder_pan    W/S shoulder_lift   E/D elbow_flex
+    R/F wrist_flex      T/G wrist_roll      Y/H gripper
     Esc  quit (always works, gate or no gate)
     Space  return live joints to their start pose, gently
-
-    NOTE (2026-08-29): shoulder_lift is temporarily on Up/Down, not W/S,
-    because its -1 direction does not move the real servo - see the KEYMAP
-    comment below and docs/PROJECT_STATUS.md. Down currently does nothing
-    on shoulder_lift; Up still works. Revert once that's fixed.
 
 Holding a key ramps the target continuously; a tap nudges it once.
 """
@@ -63,29 +58,25 @@ sys.path.insert(0, str(Path(__file__).parent / "digital_twin_env" / "robot_keybo
 JOINT_ORDER = ["shoulder_pan", "shoulder_lift", "elbow_flex",
                "wrist_flex", "wrist_roll", "gripper"]
 
-# key -> (joint, direction). NOT the same layout as M5 (see 2026-08-29 note).
+# key -> (joint, direction). Same layout as M5 so the muscle memory carries.
 #
-# 2026-08-29: shoulder_lift's -1 direction does not move the real servo
-# through this control loop, confirmed multiple ways - --debug-joint shows
-# target counting down correctly every tick while actual position never
-# changes, including across a 15-20s continuous hold (rules out a rate/
-# threshold issue, this is a hard block not a slow response). Ruled out:
-# firmware position limits (a fresh lerobot-calibrate resynced Min/Max_
-# Position_Limit and the issue persisted), a stuck/jammed joint (moves
-# freely both ways by hand), and a leash/software bug (a raw, single
-# low-level Goal_Position write in the -1 direction DID move it). Root
-# cause still open - see PROJECT_STATUS.md.
-#
-# shoulder_lift moved to up/down (off elbow_flex, which used to own those)
-# so its still-working +1 direction has a dedicated, memorable key even
-# though -1 is currently broken; w/s took over elbow_flex so nothing lost
-# its keys. Revert this whole rebinding once shoulder_lift's -1 direction
-# is fixed - there is no reason for the layout to differ from M5 otherwise.
+# 2026-08-29: shoulder_lift's -1 direction was briefly rebound off w/s onto
+# up/down after appearing to be a hard, unfixable block (see PROJECT_STATUS.md
+# for the full trail: ruled out firmware limits, a jammed joint, and a
+# leash/software bug in isolation). The actual root cause turned out to be
+# the pynput keyboard listener's background thread introducing enough timing
+# jitter that shoulder_lift - the heaviest, most gravity-loaded joint - could
+# not keep making progress under the default MAX_RELATIVE_TARGET=4.0 leash,
+# while lighter joints tolerated the same jitter fine. Fixed by giving
+# shoulder_lift its own wider leash (SHOULDER_LIFT_LEASH=12.0, see below) via
+# a per-joint max_relative_target dict rather than a single scalar. Verified
+# live in this script, not just standalone tests. Reverted to the normal
+# M5-matching layout accordingly.
 KEYMAP = {
     "q": ("shoulder_pan", +1), "a": ("shoulder_pan", -1),
-    "w": ("elbow_flex", +1), "s": ("elbow_flex", -1),
+    "w": ("shoulder_lift", +1), "s": ("shoulder_lift", -1),
     "e": ("elbow_flex", +1), "d": ("elbow_flex", -1),
-    "up": ("shoulder_lift", +1), "down": ("shoulder_lift", -1),
+    "up": ("elbow_flex", +1), "down": ("elbow_flex", -1),
     "r": ("wrist_flex", +1), "f": ("wrist_flex", -1),
     "t": ("wrist_roll", +1), "g": ("wrist_roll", -1),
     "y": ("gripper", +1), "h": ("gripper", -1),
@@ -112,6 +103,18 @@ GRIPPER_BASE = 40.0  # comfortably inside GRIPPER_MIN..MAX, used by --recover
 # runaway speed at 80 units/s in the worst case, while leaving the 5 units/s
 # normal pace untouched.
 MAX_RELATIVE_TARGET = 4.0
+
+# 2026-08-29: shoulder_lift's -1 direction reliably stalled under the pynput
+# keyboard listener's background thread at the default MAX_RELATIVE_TARGET -
+# confirmed root cause via standalone scripts bypassing the keyboard
+# entirely (see docs/PROJECT_STATUS.md): elbow_flex tolerated the same
+# listener thread fine at the same leash, but shoulder_lift is the
+# heaviest/most gravity-loaded joint (2.4x elbow_flex's holding current,
+# documented earlier) and needs more slack to keep making progress
+# tick-to-tick when the listener steals a little timing. Tripling just this
+# joint's leash fixed it in isolation testing (3 full seconds, no stall);
+# every other joint keeps the tighter MAX_RELATIVE_TARGET default.
+SHOULDER_LIFT_LEASH = 12.0
 
 CONTROL_HZ = 20.0          # command rate; the servo's own loop is much faster
 
@@ -246,7 +249,9 @@ def main():
     held_still = [j for j in JOINT_ORDER if j not in live]
     print(f"  held at start pose   : {', '.join(held_still) if held_still else '(none)'}")
     print(f"  safe envelope        : +/-{args.safe_limit:.0f} units")
-    print(f"  per-command clamp    : {args.max_relative_target:.1f} units")
+    shoulder_lift_leash = max(args.max_relative_target, SHOULDER_LIFT_LEASH)
+    print(f"  per-command clamp    : {args.max_relative_target:.1f} units "
+          f"(shoulder_lift: {shoulder_lift_leash:.1f}, see 2026-08-29 note)")
     print(f"  step while held      : {args.step:.2f} units/tick at {CONTROL_HZ:.0f} Hz"
           f"  (~{args.step * CONTROL_HZ:.1f} units/s)")
 
@@ -258,25 +263,44 @@ def main():
         if input("    Type 'i understand' to continue: ").strip().lower() != "i understand":
             sys.exit("aborted")
 
+    # See SHOULDER_LIFT_LEASH above for why this joint gets its own, wider
+    # per-command clamp instead of the shared args.max_relative_target.
+    per_joint_leash = dict.fromkeys(JOINT_ORDER, args.max_relative_target)
+    per_joint_leash["shoulder_lift"] = shoulder_lift_leash
+
     robot = SOFollower(SOFollowerRobotConfig(
         port=args.port,
         id=args.id,
-        max_relative_target=args.max_relative_target,
+        max_relative_target=per_joint_leash,
     ))
 
     print("\n  Connecting...")
     robot.connect(calibrate=False)
     print("  Connected.")
 
+    debug_log = None
+    keys = None
+
     try:
         obs = robot.get_observation()
         start = {j: float(obs[f"{j}.pos"]) for j in JOINT_ORDER}
+
+        def is_outside(j):
+            # gripper is 0..100 with its own GRIPPER_MIN..MAX (2026-08-29:
+            # tightened below the calibrated 100 to stay clear of a real
+            # mechanical stall point) - the +/-SAFE_LIMIT test is meaningless
+            # for it and was previously skipping it from recovery entirely.
+            if j == "gripper":
+                return not (GRIPPER_MIN <= start[j] <= GRIPPER_MAX)
+            return abs(start[j]) > args.safe_limit
+
         print("\n  Starting pose (normalised units):")
         for j in JOINT_ORDER:
             flag = "  <- LIVE" if j in live else ""
             warn = ""
-            if j in live and abs(start[j]) > args.safe_limit:
-                warn = f"   *** OUTSIDE +/-{args.safe_limit:.0f} ***"
+            if j in live and is_outside(j):
+                warn = ("   *** OUTSIDE GRIPPER RANGE ***" if j == "gripper"
+                         else f"   *** OUTSIDE +/-{args.safe_limit:.0f} ***")
             print(f"    {j:15s} {start[j]:+7.1f}{flag}{warn}")
 
         target = dict(start)
@@ -287,8 +311,7 @@ def main():
         # stalls; folding the wrist and elbow first, then raising the
         # shoulder, is a comfortable motion. The non-live joints are moved to
         # a sane pose once and then simply held there.
-        outside = [j for j in JOINT_ORDER
-                   if j != "gripper" and abs(start[j]) > args.safe_limit]
+        outside = [j for j in JOINT_ORDER if is_outside(j)]
         if outside:
             print(f"\n  {', '.join(outside)} start outside the safe envelope "
                   f"(+/-{args.safe_limit:.0f}).")
@@ -346,7 +369,7 @@ def main():
             recover_order = [j for j in ("gripper", "wrist_roll", "wrist_flex",
                                          "elbow_flex", "shoulder_lift",
                                          "shoulder_pan") if j in outside]
-            recover_clamp = max(args.max_relative_target, 10.0)
+            recover_clamp = max(args.max_relative_target, 10.0, per_joint_leash["shoulder_lift"])
             robot.config.max_relative_target = recover_clamp
             reach = recover_clamp * 0.8
             for j in recover_order:
@@ -381,7 +404,7 @@ def main():
                         break
                     stalled = stalled + 1 if abs(after - now) < 0.02 else 0
                     if stalled > 40:
-                        robot.config.max_relative_target = args.max_relative_target
+                        robot.config.max_relative_target = per_joint_leash
                         print(f"  STALLED at {after:+.1f}")
                         print("    The joint is not moving under command. It may be")
                         print("    carrying too much weight from this pose, or jammed.")
@@ -394,15 +417,15 @@ def main():
                 target[j] = now
                 print(f" -> {now:+.1f}")
 
-            # Back to the tight clamp for keyboard control.
-            robot.config.max_relative_target = args.max_relative_target
+            # Back to the tight (per-joint) clamp for keyboard control.
+            robot.config.max_relative_target = per_joint_leash
             print("  Recovered. Torque stays on; the arm will not sag.\n")
 
         keys = KeyboardInput(require_focus=args.require_focus or None)
         keys.start()
 
         print("\n  " + "-" * 66)
-        print("  Q/A pan   W/S or E/D elbow   Up/Down lift (temp - see note above)   R/F wristflex   T/G roll   Y/H grip")
+        print("  Q/A pan   W/S lift   E/D elbow (or Up/Down)   R/F wristflex   T/G roll   Y/H grip")
         print("  Space = back to start pose      Esc = quit")
         if args.require_focus:
             print(f"  Keys act ONLY while a '{args.require_focus}' window is focused.")
@@ -484,8 +507,13 @@ def main():
                 # joint can never reach (at +0.0, H commanded -0.25 -> clamped
                 # to -50, and the gripper simply sat there looking dead), and
                 # it caps opening at 50, hiding half the travel.
+                # 2026-08-29: further tightened to GRIPPER_MIN..MAX (not the
+                # full 0..100) - characterisation found the real jaw's true
+                # open limit is ~68 units, short of the calibrated 100, and
+                # commanding past it stalls the servo against a hard
+                # mechanical stop. See the matching note in m7_mirror_sim.py.
                 if joint == "gripper":
-                    target[joint] = max(0.0, min(100.0, v))
+                    target[joint] = max(GRIPPER_MIN, min(GRIPPER_MAX, v))
                 else:
                     target[joint] = max(-args.safe_limit,
                                         min(args.safe_limit, v))
@@ -501,11 +529,16 @@ def main():
                 debug_keys = "+".join(sorted(held_for_joint))
 
             if live_obs is not None:
-                leash = args.max_relative_target * 0.9
+                # Per-joint, matching per_joint_leash passed to SOFollower -
+                # this local pre-clamp must use the SAME wide leash for
+                # shoulder_lift or it re-narrows the target back to the
+                # flat default every tick, silently undoing the fix below
+                # and reproducing the same -1 stall this was meant to cure.
                 for j in live:
                     now = live_obs.get(j)
                     if now is None:
                         continue
+                    leash = per_joint_leash.get(j, args.max_relative_target) * 0.9
                     target[j] = max(now - leash, min(now + leash, target[j]))
 
             sent = robot.send_action({f"{j}.pos": target[j] for j in JOINT_ORDER})

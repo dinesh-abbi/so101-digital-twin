@@ -99,6 +99,13 @@ CONTROL_HZ = 20.0
 STEP_PER_TICK = 0.25
 KEY_DECAY_S = 0.6
 
+# 2026-08-29: shoulder_lift's -1 direction reliably stalled under the pynput
+# keyboard listener's background thread at the default MAX_RELATIVE_TARGET -
+# root cause confirmed in m6_keyboard_real.py via standalone scripts
+# bypassing the keyboard entirely (see docs/PROJECT_STATUS.md). Tripling
+# just this joint's leash fixed it; every other joint keeps the default.
+SHOULDER_LIFT_LEASH = 12.0
+
 # 2026-08-29 characterisation found the real gripper's true open limit is
 # ~68 normalised units (92.7 deg), short of the calibration's 100 - past
 # that the servo stalls against a hard mechanical stop under real load
@@ -107,20 +114,11 @@ KEY_DECAY_S = 0.6
 GRIPPER_MIN = 20.0
 GRIPPER_MAX = 65.0
 
-# 2026-08-29: shoulder_lift's -1 direction does not move the real servo
-# through this control loop - see the matching note in m6_keyboard_real.py
-# for what was ruled out (firmware limits, jam, leash/software bug, a
-# rate/threshold issue - a 15-20s continuous hold never moved it either)
-# and what's still open. shoulder_lift moved to up/down so its still-
-# working +1 direction has a dedicated key; w/s took over elbow_flex (off
-# up/down) so nothing lost its keys. Revert this whole rebinding once
-# shoulder_lift's -1 direction is fixed - no reason for the layout to
-# differ from M5/M6 otherwise.
 KEYMAP = {
     "q": ("shoulder_pan", +1), "a": ("shoulder_pan", -1),
-    "w": ("elbow_flex", +1), "s": ("elbow_flex", -1),
+    "w": ("shoulder_lift", +1), "s": ("shoulder_lift", -1),
     "e": ("elbow_flex", +1), "d": ("elbow_flex", -1),
-    "up": ("shoulder_lift", +1), "down": ("shoulder_lift", -1),
+    "up": ("elbow_flex", +1), "down": ("elbow_flex", -1),
     "r": ("wrist_flex", +1), "f": ("wrist_flex", -1),
     "t": ("wrist_roll", +1), "g": ("wrist_roll", -1),
     "y": ("gripper", +1), "h": ("gripper", -1),
@@ -236,9 +234,12 @@ def main():
             from lerobot.robots.so_follower import (
                 SOFollower, SOFollowerRobotConfig)
 
+            per_joint_leash = dict.fromkeys(JOINT_NAMES, args.max_relative_target)
+            per_joint_leash["shoulder_lift"] = max(
+                args.max_relative_target, SHOULDER_LIFT_LEASH)
             robot = SOFollower(SOFollowerRobotConfig(
                 port=args.port, id=args.id,
-                max_relative_target=args.max_relative_target))
+                max_relative_target=per_joint_leash))
             print(f"  port                 : {args.port}")
             print(f"  calibration id       : {args.id}")
             print(f"  LIVE joints          : {', '.join(live)}")
@@ -300,7 +301,7 @@ def main():
         keys.start()
 
         print("\n  " + "-" * 66)
-        print("  Q/A pan   W/S or E/D elbow   Up/Down lift (temp - see KEYMAP note)   R/F wristflex   T/G roll   Y/H grip")
+        print("  Q/A pan   W/S lift   E/D elbow (or Up/Down)   R/F wristflex   T/G roll   Y/H grip")
         print("  Esc = quit")
         if args.source == "real":
             print(f"  Keys act ONLY while a '{args.require_focus}' window is focused.")
@@ -359,9 +360,14 @@ def main():
                 # motion the arm then executes on its own. M6's reasoning,
                 # unchanged.
                 if live_obs is not None:
-                    leash = args.max_relative_target * 0.9
+                    # Per-joint, matching per_joint_leash passed to SOFollower -
+                    # this local pre-clamp must use the SAME wide leash for
+                    # shoulder_lift or it re-narrows the target back to the
+                    # flat default every tick, silently undoing the fix below
+                    # and reproducing the same -1 stall this was meant to cure.
                     for j in live:
                         now = live_obs[j]
+                        leash = per_joint_leash.get(j, args.max_relative_target) * 0.9
                         target[j] = max(now - leash, min(now + leash, target[j]))
 
                     robot.send_action({f"{j}.pos": target[j]

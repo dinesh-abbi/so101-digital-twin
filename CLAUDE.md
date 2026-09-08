@@ -197,6 +197,20 @@ safety, which halved the sin variation (0.771 vs 1.351) and left the fit at
 R² 0.010. The analyzer correctly refused to report a number. Measuring it
 needs a wide sweep from a pose where that is mechanically safe.
 
+**`Rhoban/bam`** (Apache-2.0, ICRA 2025) was evaluated as a possible
+replacement for this layer — same wall it targets: MuJoCo's Coulomb-viscous
+friction cannot represent load-dependent effects, which is why no single
+kp/kv satisfied both `shoulder_lift`'s transient and its settled error.
+
+**That investigation now lives in its own repo, `D:\robotics\bam-lab\`, not
+here** — BAM requires Python 3.12 and this project's `.venv` is 3.11.9, and
+keeping the two separate avoids the kind of cross-project entanglement this
+file already warns about with `so101-vr`. See `bam-lab\PLAN.md` for status,
+methodology, and results. **Nothing from that investigation has been
+adopted here** — the current fit (`kp=400 kv=25`, RMSE 1.254° → 0.434°,
+held-out confirmed) remains what's actually running, and Phase I is not
+blocked on the outcome either way.
+
 **`elbow_flex` loaded is unsafe from the extended pose** — the elbow sits at
 +98 units there (holding the forearm horizontal), so a probe sweep to −50
 would drop the forearm 145° onto the table. It needs a forearm-down pose.
@@ -472,20 +486,26 @@ cd scripts\digital_twin_env\robot_keyboard_test & ..\..\..\.venv\Scripts\python.
 ..\.venv\Scripts\python.exe scripts\m7_mirror_sim.py --source real --joints elbow_flex
 ```
 
-Keyboard controls: M5 (sim-only) uses `Q/A W/S E/D R/F T/G Y/H` for the 6
-joints ±, `Space` reset, `Esc` quit, moving 0.1° per simulation step.
+Keyboard controls (M5/M6/M7 all share this scheme): `Q/A W/S E/D R/F T/G
+Y/H` for the 6 joints ±, `Space` reset, `Esc` quit. M5 (sim-only) moves
+0.1° per simulation step. M6/M7 (real hardware) move ~5 units/s while a key
+is held, clamped to `±SAFE_LIMIT` (50 normalized units) and to LeRobot's
+`max_relative_target` per-command clamp — see M6/M7's own docstrings for
+the full safety-layer breakdown, not repeated here.
 
-**M6/M7 (real hardware) currently use a DIFFERENT layout**, temporarily:
-`Q/A` shoulder_pan, `W/S` **or** `E/D` elbow_flex, `Up/Down` shoulder_lift,
-`R/F` wrist_flex, `T/G` wrist_roll, `Y/H` gripper, `Space` reset, `Esc`
-quit. This diverges from M5 only because `shoulder_lift`'s `-1` direction
-does not move the real servo (open issue, 2026-08-29 — see
-`docs/PROJECT_STATUS.md`); `Down` on shoulder_lift currently does nothing.
-Revert to the M5 layout once that's fixed. Real-hardware moves are ~5
-units/s while a key is held, clamped to `±SAFE_LIMIT` (50 normalized
-units) and to LeRobot's `max_relative_target` per-command clamp — see
-M6/M7's own docstrings for the full safety-layer breakdown, not repeated
-here.
+**`shoulder_lift` needs a wider per-command clamp than the other joints**
+(`SHOULDER_LIFT_LEASH=12.0` vs the shared default `4.0`, in both M6/M7).
+Root cause found 2026-08-29: the `pynput` keyboard listener's background
+thread introduces enough timing jitter that this joint — the heaviest,
+most gravity-loaded one (2.4x `elbow_flex`'s holding current) — could not
+keep making progress in its `-1` direction under the tight default leash,
+even though the same jitter never affected lighter joints. Confirmed by
+isolating every other candidate first (firmware limits, a jammed joint, a
+leash/software bug) and ruling each out via standalone scripts, then
+proving the listener thread itself was sufficient to reproduce the freeze
+with no keys pressed at all. Fixed via a per-joint `max_relative_target`
+dict rather than loosening the clamp for every joint. Full trail:
+`docs/PROJECT_STATUS.md`.
 
 ## Real hardware safety, in one place
 

@@ -2,15 +2,32 @@
 
 **Last updated:** 2026-08-29
 
-## 🔴 Open hardware issue: shoulder_lift will not move in its -1 direction (2026-08-29)
+**Purpose of this file:** the single place to check "where are we right now"
+and "what's left to do." Update this whenever a phase or milestone changes
+state — this is a living tracker, not a one-time snapshot like
+`PLAN-2026-08-26.md` (that file was a single session's run-sheet and is now
+historical; everything in it is done).
+
+This file tracks status at two levels:
+- **§1 Milestones (M1–M7 + Task 1/2)** — the granular, already-largely-done
+  work, matching the tables in `CLAUDE.md` and `README.md`.
+- **§2 Phases (A–J)** — the larger goal from
+  `docs/ROADMAP_TELEOP_TO_DATASET.md` (leader-arm teleop → environment
+  parity → dataset → validation → Unreal rendering → mixed-domain training
+  → cross-domain inference), which milestones M1–M7 are only the first
+  slice of.
+
+---
+
+## ✅ RESOLVED: shoulder_lift would not move in its -1 direction (2026-08-29)
 
 Discovered while validating M6/M7 keyboard control after this session's
 joint characterization work. `shoulder_lift`'s `-1` direction (the `s` key)
-sends real commands — confirmed via `--debug-joint shoulder_lift` (target
+sent real commands — confirmed via `--debug-joint shoulder_lift` (target
 counts down correctly every control tick) — but the servo's actual
-position never changes for the whole duration of the hold, at any starting
+position never changed for the whole duration of the hold, at any starting
 position, in a fresh terminal session, after a full `lerobot-calibrate`
-resync. The `+1` direction (`w`) works normally throughout.
+resync. The `+1` direction (`w`) worked normally throughout.
 
 **Ruled out:**
 - Stuck/jammed mechanism — moves freely by hand in both directions.
@@ -55,48 +72,63 @@ mechanism to the most M6-like:
   but the multi-joint test above already succeeded at the same P=16, so
   this is ruled out too.
 
-**Net result: every mechanism tested in isolation — outside M6's actual
-running process — works correctly in both directions, including the exact
-wire payload and timing M6 uses.** Only M6 itself, run live, reliably
-fails. The one component no standalone script replicates is the `pynput`
-keyboard listener's background thread running concurrently with the
-control loop; that's the next thing to test (drive `shoulder_lift`'s `-1`
-programmatically from inside a running M6-shaped process, bypassing
-`pynput` entirely, to see if the listener thread itself is implicated) if
-this gets picked up again. Given how much has already been ruled out
-without success, this was deliberately parked rather than pursued further
-in this session.
+**Net result of all the above: every mechanism tested in isolation —
+outside M6's actual running process — worked correctly in both
+directions, including the exact wire payload and timing M6 uses.** Only
+M6 itself, run live, reliably failed. The one component no standalone
+script had replicated yet was the `pynput` keyboard listener's background
+thread running concurrently with the control loop.
 
-**Current workaround, not a fix:** `shoulder_lift` moved off `w`/`s` onto
-`up`/`down` in both `m6_keyboard_real.py` and `m7_mirror_sim.py`, so its
-still-working `+1` direction has its own dedicated key rather than being
-folded into a "both keys do the same thing" compromise; `down` currently
-does nothing. `w`/`s` now duplicate `e`/`d` (elbow_flex), so nothing lost
-its keys. `space` (reset to rest pose) still works normally via
-`goto_home.py`'s absolute positioning, which does not depend on the `-1`
-per-tick direction. Revert the whole rebinding once the real cause is
-found — there's no reason for the layout to differ from M5 otherwise.
+**Root cause, found by testing exactly that:** a script shaped like M6
+(same `SOFollower` connect/configure, same leash math, same 6-joint
+`sync_write` payload, same 20 Hz rate) but with NO `pynput` listener
+started moved `shoulder_lift`'s `-1` direction smoothly for a full 3
+seconds, no freeze. The identical script WITH a live `pynput.Listener`
+running — not even processing real keypresses, just alive in the
+background — froze after ~1.5s, reproducing the exact symptom. Ran the
+same "listener alive" test against `elbow_flex` instead: it moved fine
+the entire 3 seconds. So this isn't "pynput breaks everything" — it's
+specific to `shoulder_lift`, the heaviest and most gravity-loaded joint
+(2.4x `elbow_flex`'s holding current, documented earlier this file). The
+listener thread introduces enough timing jitter that a joint needing
+tight, consistent command cadence against gravity/backlash can't keep
+making progress under the default leash; lighter joints have enough
+margin to shrug the same jitter off.
 
-**Also fixed in passing:** `twin.py calibrate` failed with "lerobot-calibrate
-not found on PATH" even though it's installed — `shutil.which()` only
-searches the `PATH` env var, which doesn't include the venv's own `Scripts`
-folder when the venv is invoked via an absolute `python.exe` path (this
-project's own convention) rather than activated. Fixed to fall back to
-checking next to `sys.executable`.
-**Purpose of this file:** the single place to check "where are we right now"
-and "what's left to do." Update this whenever a phase or milestone changes
-state — this is a living tracker, not a one-time snapshot like
-`PLAN-2026-08-26.md` (that file was a single session's run-sheet and is now
-historical; everything in it is done).
+**Fix:** `SOFollowerRobotConfig.max_relative_target` accepts a per-motor
+dict, not just a single float. Gave `shoulder_lift` its own leash
+(`SHOULDER_LIFT_LEASH = 12.0`, 3x the shared default `4.0`) in both
+`m6_keyboard_real.py` and `m7_mirror_sim.py`, while every other joint
+keeps the tighter default. Confirmed in isolated testing (3 full seconds,
+pynput alive, no stall) and then verified live in `m6_keyboard_real.py`
+itself via `--recover`, holding Down and watching it move. The `--recover`
+flow's own clamp reassignments (on stall-abort and on successful recovery)
+also had to switch from overwriting `robot.config.max_relative_target`
+with a plain scalar to restoring the per-joint dict, or they would have
+silently wiped the fix back out partway through a session.
 
-This file tracks status at two levels:
-- **§1 Milestones (M1–M7 + Task 1/2)** — the granular, already-largely-done
-  work, matching the tables in `CLAUDE.md` and `README.md`.
-- **§2 Phases (A–J)** — the larger goal from
-  `docs/ROADMAP_TELEOP_TO_DATASET.md` (leader-arm teleop → environment
-  parity → dataset → validation → Unreal rendering → mixed-domain training
-  → cross-domain inference), which milestones M1–M7 are only the first
-  slice of.
+**Keymap reverted** to the normal M5-matching layout (`W/S` = shoulder_lift,
+`E/D`/`Up`/`Down` = elbow_flex) in both scripts, since the temporary
+Up/Down-for-shoulder_lift workaround is no longer needed.
+
+**Also fixed in passing (same investigation):**
+- `twin.py calibrate` failed with "lerobot-calibrate not found on PATH"
+  even though it's installed — `shutil.which()` only searches the `PATH`
+  env var, which doesn't include the venv's own `Scripts` folder when the
+  venv is invoked via an absolute `python.exe` path (this project's own
+  convention) rather than activated. Fixed to fall back to checking next
+  to `sys.executable`.
+- `m6_keyboard_real.py --recover` never actually recovered the gripper —
+  its outside-envelope check unconditionally excluded it (`j != "gripper"`)
+  and its recovery target was hardcoded to `0.0` (gripper's fully-CLOSED
+  end, itself outside `GRIPPER_MIN..MAX`). Both fixed: gripper is now
+  correctly detected as out-of-range using its own `GRIPPER_MIN..MAX` test,
+  and recovers to `GRIPPER_BASE=40` instead of `0`.
+- `m7_mirror_sim.py`'s `UnboundLocalError: record_file` — the out-of-envelope
+  early `return` in `main()` skipped the line that initialized
+  `record_file = None`, so the cleanup code at the bottom crashed
+  referencing it. Fixed by initializing `record_file = None` at the top of
+  `main()`, alongside the existing `robot = None` / `keys = None`.
 
 ---
 
@@ -132,7 +164,7 @@ Full detail on the joint-mapping math specifically:
 ```
 Phase A: Finish joint parity        [==========]  6 of 6 joints characterized, DONE
 Phase B: Object/scene parity        [..........]  Not started
-Phase C: Leader-arm teleop          [..........]  Blocked — no leader-arm hardware yet
+Phase C: Leader-arm teleop          [==========]  DONE — leader->real follower->sim, 2026-09-04
 Phase D: VR teleop (revisited)      [..........]  Attempted once (Quest, non-telegrip), unsuccessful
 Phase E: Dataset recording          [..........]  Not started — current --record output is a debug CSV, not a training dataset
 Phase F: Dataset validation         [..........]  Not started — depends on E existing first
