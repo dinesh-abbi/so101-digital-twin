@@ -382,12 +382,63 @@ def main():
                 print(f"    {j:15s} {start[j]:+7.1f} -> {goal:+.1f} ",
                       end="", flush=True)
                 stalled = 0
+                traveled = 0.0
+                prev = start[j]
+                # Hard distance cap, independent of the stall detector below.
+                # A calibration confound can make the servo move genuinely
+                # (never stalling) while never converging on goal -- e.g.
+                # walking the wrong direction because homing_offset put
+                # "now" on the far side of a wrap point. Bounded joints have
+                # under 130 units of real travel end to end (their
+                # normalized span, per this arm's own calibration); the
+                # wrap-around fix just below caps wrist_roll's own worst
+                # case at 100 (half its 200-unit circle, the longest any
+                # shortest-path step can be). 400 is comfortably above
+                # either, so it only fires on a genuine runaway, not a long
+                # but legitimate walk -- "still moving" alone does not catch
+                # that, since a joint chasing a goal around a wrap point, or
+                # walking the wrong direction from a bad homing_offset,
+                # keeps moving the whole time and never trips the stall
+                # check.
+                travel_cap = 400.0
+                # wrist_roll has no hard stop (0-4095 raw ticks, continuous
+                # rotation per CLAUDE.md) -- plain linear distance can send
+                # it the LONG way around (e.g. +95 -> 0 the "wrong" way is
+                # -95, but +5 the other way arrives sooner and is exactly
+                # the discrepancy that let a bad direction/distance loop
+                # spin it continuously). Wrap distance/direction into the
+                # shorter of the two paths around this joint's normalized
+                # circle for this joint only; every other joint is bounded
+                # and plain linear distance is correct for them. Every arm
+                # joint here uses MotorNormMode.RANGE_M100_100 (so_follower.py
+                # -- use_degrees defaults False), a 200-unit span -100..+100,
+                # not the 0..100 gripper uses.
+                wraps = j == "wrist_roll"
+                wrap_span = 200.0
                 for _ in range(3000):
                     now = float(robot.get_observation()[f"{j}.pos"])
+                    traveled += abs(now - prev)
+                    prev = now
+                    if traveled > travel_cap:
+                        robot.config.max_relative_target = per_joint_leash
+                        print(f"  ABORTED at {now:+.1f} "
+                              f"({traveled:.0f} units traveled, cap {travel_cap:.0f})")
+                        print("    This joint moved further than its own full range")
+                        print("    without reaching the goal -- likely walking the")
+                        print("    wrong direction from a calibration mismatch, not")
+                        print("    a normal recovery. Torque stays on. Check")
+                        print("    calibration before retrying --recover.")
+                        return
                     if abs(now - goal) < 1.0:
                         break
-                    direction = 1.0 if goal > now else -1.0
-                    target[j] = now + direction * min(reach, abs(goal - now))
+                    delta = goal - now
+                    if wraps:
+                        # Shortest signed path on the -100..+100 normalized
+                        # circle (same RANGE_M100_100 scale as every other
+                        # arm joint, just with no hard stop at either end).
+                        delta = (delta + wrap_span / 2) % wrap_span - wrap_span / 2
+                    direction = 1.0 if delta > 0 else -1.0
+                    target[j] = now + direction * min(reach, abs(delta))
                     robot.send_action({f"{k}.pos": target[k] for k in JOINT_ORDER})
                     time.sleep(1.0 / CONTROL_HZ)
 
