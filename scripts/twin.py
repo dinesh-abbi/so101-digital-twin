@@ -82,6 +82,18 @@ COMMANDS = {
                "M7: keyboard -> real arm + mirrored sim together. "
                "--source sim|real (default sim = no hardware)."),
 
+    # --- Leader-arm teleop (needs BOTH a leader and a follower arm) ---------
+    "leader-sim": (HERE / "m_leader_mirror_sim.py",
+                   "Leader arm -> sim only. Read-only on the leader, no "
+                   "follower risk. Bring-up step 1."),
+    "leader": (HERE / "m_leader_teleop.py",
+               "Leader arm -> REAL follower. Bring-up step 2."),
+    "leader-mirror": (HERE / "m_lerobot_teleop_sim.py",
+                      "Leader arm -> real follower + mirrored sim together. "
+                      "Bring-up step 3."),
+    "scan-bus": (HERE / "scan_leader_bus.py",
+                 "Diagnostic: scan a serial port for Feetech motor IDs."),
+
     # --- Hardware setup / recovery / diagnostics ----------------------------
     "calibrate": (None, "Run LeRobot's calibration wizard for this arm "
                         "(wraps lerobot-calibrate --robot.type=so101_follower)."),
@@ -125,6 +137,8 @@ COMMANDS = {
 GROUPS = [
     ("Sim only (no hardware)", ["table", "cube", "robot-on-table", "sim"]),
     ("Real hardware", ["real", "mirror"]),
+    ("Leader-arm teleop (needs two arms)",
+     ["leader-sim", "leader", "leader-mirror", "scan-bus"]),
     ("Setup / recovery / diagnostics",
      ["calibrate", "check-pose", "home", "key-test"]),
     ("Validation", ["validate", "map-check"]),
