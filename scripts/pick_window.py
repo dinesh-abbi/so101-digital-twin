@@ -96,6 +96,18 @@ def main():
         print(f"{path}: no data rows", file=sys.stderr)
         return 1
 
+    # recordings/ also holds older characterisation CSVs with a completely
+    # different schema. Say so plainly instead of dying on a KeyError --
+    # this is the first thing a mistyped filename hits.
+    need = ["wall_time"] + [f"{j}_sim_qpos_deg" for j in JOINT_NAMES]
+    missing = [c for c in need if c not in rows[0]]
+    if missing:
+        print(f"{path}: not a teleop recording -- no {missing[0]} column.\n"
+              "Only sessions recorded by m_leader_mirror_sim.py --record or "
+              "m_lerobot_teleop_sim.py --record can be replayed.",
+              file=sys.stderr)
+        return 1
+
     t0 = float(rows[0]["wall_time"])
     judged = [j for j in JOINT_NAMES if j not in SKIP]
 
