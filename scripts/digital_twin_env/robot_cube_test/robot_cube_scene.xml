@@ -1,0 +1,164 @@
+<mujoco model="so101_cube_scene">
+  <!-- Bare scene + a graspable cube + cameras. Milestone: sim-only object
+       manipulation (docs/TELEOP_SESSION_LOG_AND_PLAN.md "Today's plan" #1).
+
+       WHY BARE, NOT THE TABLE: the table scenes have an unresolved ~5 cm
+       height mismatch (that doc, section A) -- poses the real arm reaches
+       cleanly put the sim gripper below the modeled tabletop. Building the
+       first working grasp on top of an unresolved geometry bug would make
+       every failure ambiguous. Here the robot's base sits on the
+       groundplane, which is exactly the configuration all recent
+       recordings used.
+
+       WHY THE CUBE IS WHERE IT IS -- measured, not chosen. scripts/
+       analyze_workspace.py forward-kinematics a recorded teleop session
+       and reports where the gripper actually went. Three independent
+       sessions agree on where the operator closed the jaws:
+
+         teleop_log_pick2.csv   x=+0.373  y=+0.027  z=0.094
+         teleop_log_pick3.csv   x=+0.359  y=+0.022  (site frame)
+         teleop_log_60fps.csv   x=+0.347  y=+0.020  (site frame)
+
+       (pick2's numbers are the JAW MIDPOINT, the other two the
+       gripperframe site, which sits ~2 cm higher -- so all three agree
+       more closely than the raw figures suggest.)
+
+       WHY REPLAYING A RECORDING CANNOT GRASP -- measured, not assumed.
+       Those sessions were made with NO object present, so the operator
+       never had anything to avoid or to open around. Two gaps matter, and
+       the second one is easy to miss:
+
+       (1) THE OPEN GAP -- how wide the jaws ever get. Tip-to-tip
+       separation vs the gripper's normalised command, off the compiled
+       model:
+
+         norm    gap
+          1.7   0.6 cm   fully closed -- where every session starts
+         21.2   3.4 cm   <- the WIDEST any recorded session opens
+         45     6.7 cm   what grasp_cube.py uses
+
+       (2) THE APPROACH GAP. The arm does NOT approach with the gripper
+       open. From teleop_log_pick2.csv, frame by frame:
+
+         t=23.0  arrives at the target, gripper 11.19 -> gap 1.93 cm
+         t=23-25 sits there, still 1.93 cm
+         t=25.5  OPENS to 21.0 -> gap 3.38 cm
+         t=26.0  closes
+         t=26.5  fully shut, 0.59 cm
+
+       So the jaws travel INTO the grasp position while only 1.93 cm
+       apart. Any cube wide enough to be gripped is bulldozed ~3 s before
+       the grasp; any cube narrow enough to survive that slips through the
+       0.59 cm closed jaws. Tested across 8 sizes from 0.6 to 1.8 cm --
+       none were lifted, at any size.
+
+       This looks exactly like a contact-tuning failure and is not one. No
+       friction or solref value lets a cube pass through a gap narrower
+       than itself. CHECK BOTH GAPS BEFORE TUNING CONTACT.
+
+       Hence grasp_cube.py, which opens the jaws BEFORE approaching and
+       descends from above -- the order a grasp actually needs. Replay a
+       recording here to watch the arm move; use grasp_cube.py to pick the
+       cube up. -->
+
+  <compiler angle="radian" autolimits="true" meshdir="../../../so101_assets/assets"/>
+
+  <include file="../../../so101_assets/so101.xml"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="140" elevation="-20"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7"
+             rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="5 5" reflectance="0.2"/>
+    <material name="cube_mat" rgba="0.95 0.55 0.05 1" specular="0.3" shininess="0.3"/>
+    <material name="pedestal_mat" rgba="0.35 0.35 0.38 1" specular="0.1"/>
+  </asset>
+
+  <default>
+    <default class="cube_collision">
+      <!-- condim=6 to match the jaw tips (so101.xml class
+           "collision_gripper"). A condim=3 cube against condim=6 jaws
+           gets no torsional friction, so a pinched cube spins out of the
+           grasp instead of being held.
+
+           NOTE ON WHO WINS: MuJoCo takes contact parameters from the geom
+           with the higher `priority`, and so101.xml sets priority=1 on
+           the jaw geoms. So the JAWS' friction (0.45, a PLA-on-PLA
+           estimate) governs the grasp contact, not the numbers here --
+           these apply to cube-vs-pedestal and cube-vs-floor. Tune the
+           grasp by changing the jaw side, or by giving the cube a higher
+           priority, not by editing friction here and expecting it to
+           bite. -->
+      <geom contype="1" conaffinity="1" condim="6"
+            friction="0.8 0.02 0.001" solref="0.01 1" solimp="0.95 0.99 0.001"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <!-- Overhead: looks straight down at the grasp area. The framing a
+         top-down workspace camera would give. -->
+    <camera name="overhead" pos="0.30 0.00 0.75" xyaxes="0 1 0 -1 0 0"/>
+
+    <!-- Side-on close view of the grasp, for watching jaw/cube contact.
+         Pulled in and raised from the first attempt (pos 0.38 -0.45 0.22),
+         which framed the cube well but cut the jaws off at the top of the
+         image -- the jaws are the half that matters when diagnosing why a
+         grasp slipped. -->
+    <camera name="grasp_view" pos="0.42 -0.34 0.30" xyaxes="1 0 0 0 0.5 0.87"/>
+
+    <!-- Wide angle on the whole arm plus the object. -->
+    <camera name="workspace" pos="0.95 -0.75 0.65" xyaxes="0.6 0.8 0 -0.45 0.34 0.82"/>
+
+    <!-- NO PEDESTAL. An earlier version of this scene raised the cube to
+         z=0.094 on a post, so that replaying teleop_log_pick2.csv would
+         grasp it. That does not work, and the reason is worth keeping:
+
+         The recorded sessions were made with NO object present, so the
+         arm approaches the grasp point with the jaws nearly SHUT (1.93 cm)
+         and only opens once it has arrived. Any cube big enough to be
+         gripped is therefore bulldozed ~3 s before the grasp, and any cube
+         small enough to survive the approach slips through the 0.59 cm
+         fully-closed jaws. Measured across 8 sizes from 0.6 to 1.8 cm --
+         none were lifted. There is no cube that recording can pick up.
+
+         So the cube now sits on the FLOOR at a reachable spot, and
+         grasp_cube.py drives a scripted approach-from-above that opens
+         the jaws BEFORE descending. Replay a recording into this scene to
+         watch the arm move; use grasp_cube.py to actually pick it up. -->
+
+    <!-- The graspable cube. 2 cm, 3.2 g -- sized to the REAL cube on
+         this bench (measured ~2 cm, 2026-09-10), not to M2's 5 cm test
+         cube, so the sim object matches the physical one it stands for.
+         Density 400 kg/m^3, same as M2's 5 cm / 50 g cube.
+
+         Sits on the floor at x=0.32 -- inside the 0.08-0.38 m reach
+         envelope measured by analyze_workspace.py, and at a spot where
+         the arm can actually achieve a NOSE-DOWN wrist pose (verified by
+         sweeping x: a top-down straddle solves cleanly at 0.32 and 0.36,
+         and not at all below ~0.30, where the wrist cannot pitch over).
+
+         Free joint, so it is fully dynamic: it can be lifted, carried,
+         dropped, and knocked over. Its qpos lives at data.qpos[6:13]
+         (7 values: 3 position + 4 quaternion), immediately after the
+         arm's 6 joints -- which is why every script here slices the arm
+         as qpos[:6] rather than assuming the whole array is the arm. -->
+    <body name="cube" pos="0.3200 0.0000 0.0100">
+      <freejoint name="cube_freejoint"/>
+      <geom name="cube_geom" type="box" size="0.010 0.010 0.010"
+            mass="0.0032" material="cube_mat" class="cube_collision"/>
+    </body>
+  </worldbody>
+</mujoco>
