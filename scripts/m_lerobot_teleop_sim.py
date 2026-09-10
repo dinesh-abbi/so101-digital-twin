@@ -148,6 +148,29 @@ DEFAULT_MAX_RELATIVE_TARGET = 4.0
 # m7_mirror_sim.py, and GRIPPER_SAFE_MAX in so101_joint_characterization.py.
 GRIPPER_MAX = 65.0
 
+# ---- wrist_roll runaway guard --------------------------------------------
+# Added 2026-09-10 after this script spun wrist_roll continuously and killed
+# the motor bus ("no status packet" on all 6 IDs) about 3 s into a session.
+# The recorded CSV shows exactly what happened:
+#
+#   leader commanded wrist_roll = -0.6, CONSTANT, for all 173 ticks
+#   follower measured   3.8 -> -50 -> -100.0 at tick 48
+#                       -> WRAPPED to +96.8 at tick 49 -> kept walking down
+#
+# wrist_roll is the only joint with no hard stop (0..4095 raw ticks =
+# continuous rotation, CLAUDE.md). When it crosses the -100 rail its
+# normalised reading jumps to +100, so a servo chasing -0.6 from +96.8 sees
+# a huge error and keeps turning the SAME way. It never converges -- it just
+# rotates until the cable winds up and takes the bus down.
+#
+# Two independent checks, because they catch different things: divergence
+# catches "not tracking" within a tick or two, cumulative travel catches a
+# slow walk that never trips a per-tick threshold. m6_keyboard_real.py has
+# had the travel cap since f03e77a and replay_teleop_real.py got both today;
+# this script had neither, which is why nothing stopped it.
+WRIST_ROLL_TRAVEL_CAP = 150.0
+DIVERGENCE_LIMIT = 25.0
+
 # How many consecutive ticks a self-collision state must hold before it is
 # reported. At a marginal fold MuJoCo gains and loses contact on
 # consecutive frames; undebounced that produced ~50 [fold] messages in one
@@ -428,6 +451,10 @@ def main():
         was_colliding = False
         pending = None
         pending_count = 0
+        # Runaway-guard state -- see WRIST_ROLL_TRAVEL_CAP at the top.
+        roll_traveled = 0.0
+        roll_prev = None
+        abort_reason = None
         while True:
             loop_start = time.perf_counter()
 
@@ -451,6 +478,48 @@ def main():
             if "gripper.pos" in robot_action_to_send:
                 robot_action_to_send["gripper.pos"] = min(
                     GRIPPER_MAX, robot_action_to_send["gripper.pos"])
+
+            # ---- Runaway guards. See WRIST_ROLL_TRAVEL_CAP at the top
+            # for the incident these exist to stop. Checked BEFORE
+            # send_action, so a joint already running away is not
+            # commanded again.
+            roll_now = float(obs["wrist_roll.pos"])
+            if roll_prev is not None:
+                step = abs(roll_now - roll_prev)
+                # Ignore the rail wrap itself (-100 -> +100 reads as a
+                # 200-unit jump); it is the CUMULATIVE walk that matters,
+                # and counting the wrap would trip the cap instantly.
+                if step < 100.0:
+                    roll_traveled += step
+            roll_prev = roll_now
+            if roll_traveled > WRIST_ROLL_TRAVEL_CAP:
+                abort_reason = (
+                    f"wrist_roll has travelled {roll_traveled:.0f} units "
+                    f"(cap {WRIST_ROLL_TRAVEL_CAP:.0f}).\n"
+                    "  It has no hard stop, so once it walks past a rail it "
+                    "wraps and keeps\n  turning forever -- winding the cable "
+                    "until the bus drops.")
+                break
+
+            for _j in JOINT_NAMES:
+                _cmd = robot_action_to_send.get(f"{_j}.pos")
+                if _cmd is None:
+                    continue
+                _gap = abs(float(obs[f"{_j}.pos"]) - float(_cmd))
+                # wrist_roll's wrap makes a legitimate reading look 200
+                # units off; anything at/over that is the wrap, not drift.
+                if _j == "wrist_roll" and _gap > 150.0:
+                    _gap = abs(_gap - 200.0)
+                if _gap > DIVERGENCE_LIMIT:
+                    abort_reason = (
+                        f"{_j} is {_gap:.1f} units from its command "
+                        f"(commanded {float(_cmd):+.1f}, measured "
+                        f"{float(obs[f'{_j}.pos']):+.1f}, limit "
+                        f"{DIVERGENCE_LIMIT:.0f}).\n"
+                        "  The joint is not following the leader.")
+                    break
+            if abort_reason:
+                break
 
             follower.send_action(robot_action_to_send)
 
@@ -547,6 +616,16 @@ def main():
                           f"run={viewer.is_running()}", flush=True)
 
             precise_sleep(max(period - (time.perf_counter() - loop_start), 0.0))
+
+        if abort_reason:
+            print("\n" + "=" * 70)
+            print("  ABORTED -- runaway guard tripped")
+            print("=" * 70)
+            print(f"  {abort_reason}")
+            print("\n  Recording (if any) is kept up to this point.")
+            print("  POWER OFF the follower, then unwind wrist_roll by hand -- "
+                  "count the turns\n  so the cable is not left twisted. "
+                  "Re-run follower_raw_probe.py before\n  driving it again.")
 
     except KeyboardInterrupt:
         print("\n\n  Interrupted.")

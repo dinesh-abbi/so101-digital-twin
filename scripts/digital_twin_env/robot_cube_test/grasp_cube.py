@@ -71,18 +71,18 @@ GRIP_CLOSED = 8.0        # short of 0: the jaws should stall ON the cube,
 SUCCESS_LIFT = 0.05      # m -- cube must rise this far to count
 
 
-PITCH_TARGET = -0.85     # world z of the gripper's local x axis; nose-down
-PITCH_WEIGHT = 0.5       # how hard to insist on it, vs hitting the position
+def _ik_once(model, data, target_xyz, q_init, grip_rad, n_iter=800,
+             tol=1e-5):
+    """One damped-least-squares solve from a single starting guess.
 
-
-def _ik_once(model, data, target_xyz, q_init, grip_rad, n_iter=600,
-             tol=1e-4):
-    """One damped-least-squares solve from a single starting guess."""
+    POSITION ONLY -- three rows, five joints, so the arm keeps two degrees
+    of redundancy and the solver converges to ~0.00 mm everywhere in the
+    workspace. Orientation is deliberately NOT constrained; see ik_solve.
+    """
     fixed = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
                               "fixed_jaw_sph_tip1")
     moving = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM,
                                "moving_jaw_sph_tip1")
-    grip_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "gripper")
 
     q = np.array(q_init, dtype=float)
     lo = model.jnt_range[:5, 0]
@@ -90,73 +90,81 @@ def _ik_once(model, data, target_xyz, q_init, grip_rad, n_iter=600,
 
     jp1 = np.zeros((3, model.nv))
     jp2 = np.zeros((3, model.nv))
-    jacr = np.zeros((3, model.nv))
-    err = np.zeros(4)
 
     # Solve with the jaws at their ACTUAL opening -- the midpoint between
     # the tips moves as the gripper opens, so solving at a different width
     # than the approach will use puts the object off-centre.
     data.qpos[5] = grip_rad
 
+    err = np.zeros(3)
     for _ in range(n_iter):
         data.qpos[:5] = q
         mujoco.mj_forward(model, data)
 
         mid = (data.geom_xpos[fixed] + data.geom_xpos[moving]) / 2
-        err[:3] = target_xyz - mid
-
-        # The gripper body's local x axis points along the jaws; its world
-        # z component says how nose-down the gripper is.
-        xmat = data.xmat[grip_bid].reshape(3, 3)
-        err[3] = (PITCH_TARGET - xmat[2, 0]) * PITCH_WEIGHT
-
+        err = target_xyz - mid
         if np.linalg.norm(err) < tol:
             break
 
         mujoco.mj_jacGeom(model, data, jp1, None, fixed)
         mujoco.mj_jacGeom(model, data, jp2, None, moving)
-        mujoco.mj_jacBody(model, data, None, jacr, grip_bid)
-        # d(approach_z)/dq for a rotation w is (w x xaxis)_z, and
-        # (w x a)_z = w_x*a_y - w_y*a_x.
-        xaxis = xmat[:, 0]
-        d_app = jacr[0, :5] * xaxis[1] - jacr[1, :5] * xaxis[0]
+        j = (jp1[:, :5] + jp2[:, :5]) / 2
 
-        j = np.vstack([(jp1[:, :5] + jp2[:, :5]) / 2, -d_app * PITCH_WEIGHT])
-        lam = 0.06
-        dq = j.T @ np.linalg.solve(j @ j.T + lam ** 2 * np.eye(4), err)
+        lam = 0.04
+        dq = j.T @ np.linalg.solve(j @ j.T + lam ** 2 * np.eye(3), err)
         q = np.clip(q + dq, lo, hi)
 
-    return q, float(np.linalg.norm(err[:3]))
+    return q, float(np.linalg.norm(err))
 
 
 def ik_solve(model, data, target_xyz, q_init, grip_norm=None):
-    """IK putting the JAW MIDPOINT at target_xyz, gripper pitched nose-down.
+    """IK putting the JAW MIDPOINT at target_xyz. Position only.
 
     Solves for the 5 ARM joints only -- the gripper is commanded directly,
     never by IK, since its job is opening width and not position.
 
-    WHY ORIENTATION IS CONSTRAINED. Position alone leaves the wrist free,
-    and the solver happily returns a pose with the gripper lying flat and
-    the jaws opening VERTICALLY -- one tip resting on the cube, the other
-    6.5 cm away in mid-air. Measured exactly that on the first attempt:
-    IK residual 0.03 mm and the cube never moved, because nothing could
-    close around it. The fourth row asks for the gripper's approach axis
-    to point downward, which is what makes the jaws actually straddle the
-    object.
+    WHY NO ORIENTATION CONSTRAINT -- this took three attempts to get right
+    and the answer is counter-intuitive, so it is worth recording.
 
-    WHY MULTIPLE STARTS. With the pitch row added the problem has local
-    minima, and a single solve from the rest pose lands in one at some
-    targets: sweeping x across the workspace gave 6 mm residuals at
-    x=0.32 and x=0.36 but 110-170 mm at neighbouring values -- those are
-    bad starting guesses, not unreachable poses. Seeding several starts
-    and keeping the best fixes it.
+    The gripper's local frame, measured by opening the jaws at a fixed arm
+    pose and watching which local direction the moving tip travels:
+
+        local +x   the OPENING axis (moving tip slides 0.063 m along it)
+        local -z   the POINTING axis (both tips sit at local z = -0.10)
+
+    Attempt 1, no orientation: the solver returned poses with one tip on
+    the cube and the other 6.5 cm away in mid-air. Residual 0.03 mm, cube
+    never moved.
+
+    Attempt 2 constrained local x downward -- but local x is the OPENING
+    axis, so that asks the jaws to open vertically. The gripper arrived
+    edge-on and shoved the cube aside.
+
+    Attempt 3 asked for a proper top-down straddle: local -z down AND
+    local x level. That is five constraints on five joints, and it does
+    not converge -- residual 119 mm at the cube, 40-120 mm everywhere
+    else. Scanning the workspace showed the opening axis pinned at
+    xax_z ~= -0.8 at EVERY reachable target: the arm has no roll freedom
+    in that direction, because wrist_roll turns about the forearm axis,
+    not the one a top-down pick needs.
+
+    **A top-down straddle is not achievable on this arm.** But the pose it
+    naturally adopts already straddles the cube in the VERTICAL plane --
+    fixed jaw below, moving jaw above, a side approach. Position-only IK
+    converges to ~0.00 mm everywhere and the jaws straddle at every height
+    tested. So the constraint is dropped and the arm's own geometry does
+    the work.
+
+    WHY MULTIPLE STARTS. The problem still has local minima -- a single
+    solve from the rest pose lands in one at some targets. Seeding several
+    starts and keeping the best fixes it, cheaply.
 
     Damped rather than plain pseudo-inverse because the SO-101 hits
     singular configurations (fully extended, or wrist aligned with the
     shoulder axis) where an undamped solve produces enormous joint steps
     and throws the arm across the workspace.
     """
-    grip_rad = (grip_to_rad(model, GRIP_OPEN) if grip_norm is None
+    grip_rad = (grip_to_rad(model, GRIP_CLOSED) if grip_norm is None
                 else grip_to_rad(model, grip_norm))
 
     seeds = [
