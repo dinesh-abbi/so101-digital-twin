@@ -27,10 +27,12 @@ debugging, not a substitute for either.
 | Workspace analysis | `analyze_workspace.py` | FK a recording, find grasp points |
 | Cube scene + cameras | `robot_cube_test/` | 16/16 headless checks |
 
+| **Sim → real replay** | `replay_teleop_real.py --source sim` | **validated on hardware** |
+| Leader → sim recording | `m_leader_mirror_sim.py --record` | no follower needed |
+
 **Not working yet:** `robot_cube_test/grasp_cube.py` reaches the cube but
 does not lift it (wrist orientation — see the 2026-09-10 session notes).
-`replay_teleop_real.py` still has no `--source sim`, so **MuJoCo has never
-driven the hardware.**
+`wrist_roll` is excluded from every hardware run via `--skip-joints`.
 
 **Best measured accuracy** (`teleop_log_pick2.csv`, 60 fps, 33.5 s):
 
@@ -263,6 +265,90 @@ It sat parked in a self-colliding fold for ~98% of the session, so 95% of
 **That is not a regression.** Before comparing sessions, either trim idle
 time or compare medians. A long recording of a stationary arm is not a
 better dataset than a short one of real motion.
+
+---
+
+## WORKING: leader → sim → dataset → real arm (2026-09-10, validated)
+
+**The full loop runs.** MuJoCo drives the real follower through a motion
+recorded from the leader, start to finish. Before today the sim had never
+commanded the hardware at all.
+
+### The three commands
+
+```powershell
+# 1. RECORD -- leader teleops the SIM. No follower connected, so nothing
+#    can run away.
+...\python.exe scripts\m_leader_mirror_sim.py `
+  --port COM8 --id twin_leader_2 --bare --wires --fps 60 `
+  --record recordings\dataset_1.csv
+
+# 2. CHECK -- pick the window and speed (analysis only, no hardware)
+...\python.exe scripts\replay_teleop_real.py recordings\dataset_1.csv `
+  --source sim --window 6 30 --speed 0.3 --dry-run --bare --no-sim `
+  --skip-joints wrist_roll
+
+# 3. REPLAY -- MuJoCo drives the real arm
+...\python.exe scripts\replay_teleop_real.py recordings\dataset_1.csv `
+  --source sim --window 6 30 --speed 0.3 `
+  --follower-port COM14 --follower-id twin_follower_3 `
+  --bare --wires --fps 60 --skip-joints wrist_roll --approach
+```
+
+### Measured accuracy — `dataset_1.csv`, window 6–30 s
+
+| Joint | mean | max |
+|---|---:|---:|
+| shoulder_pan | 0.65 | 3.53 |
+| shoulder_lift | 0.79 | 6.08 |
+| elbow_flex | 0.94 | 5.30 |
+| wrist_flex | 0.74 | 10.26 |
+| gripper | 0.00 | 0.07 |
+
+Sub-unit mean divergence on every commanded joint, across 24 s.
+
+### How to record so replay just works
+
+Everything that needed working around today came from the recording, not
+the code:
+
+1. **Hold still at rest for ~3 s before moving.** Then the clean window
+   starts at t=0 and the follower is already in position — no `--approach`,
+   no window hunting.
+2. **Move SLOWLY.** This is what sets `--speed`. `simple_1.csv` peaked at
+   1.04 units/tick and needed 0.4; `dataset_1.csv` peaked at 2.17 and
+   needed 0.3. Slower leader motion replays closer to 1.0x.
+3. **Stay out of tight folds.** Every large divergence measured today was
+   sim self-collision at folded poses — 99 units in the first 2 s of both
+   recordings, 24 in the last 2. The middle is always clean.
+4. **Return to rest and hold**, so the next session starts in position.
+
+### Why `--speed` matters, and what it measures
+
+Not a workaround — a measurement. On `simple_1.csv` the sim commanded
+`elbow_flex` down 71 units in 2.3 s and the real joint managed 25, about a
+third of the demanded rate. That is **not** the clamp (62 units/s demanded
+against the 240 a 4.0 clamp allows at 60 fps): it is the STS3215 lowering
+the forearm against gravity. MuJoCo's position actuators have no such
+trouble.
+
+**The speed at which a sim-sourced trajectory stops being trackable IS the
+sim-to-real gap for that motion.** Worth recording per trajectory rather
+than tuning away.
+
+### Still open
+
+- **`wrist_roll` is excluded** via `--skip-joints` on every run. It creeps
+  ~0.05 units/tick under torque even when commanded to hold a constant
+  value, then wraps past its rail and rotates until the bus drops. Ruled
+  out: the recording, the leader, the encoder (zero drift with torque
+  off), the clamp, the servo gains (P=16 D=32, same as healthy joints),
+  and EEPROM position limits (a write to 900..3200 did not survive a power
+  cycle, and did not change the behaviour while it was in place). What
+  remains: it is the only joint whose calibrated range is the FULL encoder
+  (0..4095), so it has no reference to settle against. Look there first.
+- The gripper never opened in `dataset_1.csv` (travel 0.1 units), so it is
+  an arm-motion dataset, not a manipulation one.
 
 ---
 
