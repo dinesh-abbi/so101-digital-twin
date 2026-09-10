@@ -552,6 +552,15 @@ def main():
                 input("  Press ENTER to begin the approach...")
                 goal = {j: (here[j] if j in skip else first[j])
                         for j in JOINT_NAMES}
+                # Ramp an ABSOLUTE target, never "measured position + a
+                # step". Commanding relative to the measurement is a
+                # treadmill: a joint that lags even slightly has its target
+                # recomputed from where it actually is, so it advances at
+                # the lag rate and never converges. That is what stalled
+                # elbow_flex at exactly 12.37 units for 2000 steps -- zero
+                # progress, not slow progress. Probing the same joint with
+                # absolute commands moved it 12.9 units without complaint.
+                ramp = dict(here)
                 for _step in range(2000):
                     obs = follower.get_observation()
                     cur = {j: float(obs[f"{j}.pos"]) for j in JOINT_NAMES}
@@ -565,16 +574,14 @@ def main():
                         if j in skip:
                             cmd[f"{j}.pos"] = cur[j]
                             continue
-                        # Step each joint at a rate it can actually manage.
-                        # A single rate for all six stalls the loaded ones:
-                        # measured on demo.csv, wrist_flex closed a 60-unit
-                        # gap while elbow_flex stuck at 12, because it was
-                        # being asked to lower the forearm at the same
-                        # 1.5 units/tick as a joint carrying nothing.
+                        # Advance the ramp at a rate this joint can manage:
+                        # a single rate for all six asks the loaded ones to
+                        # lower the arm as fast as an unloaded wrist.
                         rate = args.approach_speed / APPROACH_WEIGHT.get(
                             j, 1.0)
-                        d = remaining[j]
-                        cmd[f"{j}.pos"] = cur[j] + max(-rate, min(rate, d))
+                        d = goal[j] - ramp[j]
+                        ramp[j] += max(-rate, min(rate, d))
+                        cmd[f"{j}.pos"] = ramp[j]
                     cmd["gripper.pos"] = min(GRIPPER_MAX, cmd["gripper.pos"])
                     follower.send_action(cmd)
                     if _step % 20 == 0:
