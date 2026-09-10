@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Pick the best replay window and speed for a recording. Prints one line:
+
+    START END SPEED
+
+Nothing else, so a shell can read it directly. Exits non-zero with a
+message on stderr if no window is usable.
+
+WHAT IT IS CHOOSING BETWEEN. Two things decide whether a sim-sourced
+replay runs cleanly, and both are properties of the recording:
+
+  WINDOW -- where sim and real agree. The folded ends of every session
+    diverge hugely (measured 99 units in the first 2 s of three separate
+    recordings) because the sim self-collides at poses the real arm folds
+    through fine. The middle is always clean. Those frames must never
+    reach hardware.
+
+  SPEED -- how fast the trajectory demands the joints move. A sim
+    trajectory can be physically faster than the arm: measured 71 units of
+    elbow_flex descent commanded in 2.3 s where the real joint managed 25.
+    That is not the clamp, it is the servo lowering the forearm against
+    gravity, so the fix is to stretch playback rather than loosen a guard.
+
+Usage:
+    python pick_window.py recordings/dataset_2.csv
+"""
+
+import csv
+import math
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).parent
+sys.path.insert(0, str(_HERE / "digital_twin_env" / "real_sim_mapping_test"))
+
+import mujoco                                    # noqa: E402
+
+from real_sim_joint_mapping import (             # noqa: E402
+    JOINT_NAMES,
+    sim_joint_ranges_from_model,
+    sim_to_real_vector,
+    widen_shoulder_lift,
+)
+
+BARE_SCENE = (_HERE / "digital_twin_env" / "robot_bare_test"
+              / "robot_bare_scene.xml")
+
+# A 2 s bucket counts as clean if no joint diverges more than this. Chosen
+# from measurement, not taste: clean stretches sit at 2-7 units and folded
+# ends jump straight to 20-99, so anything in 10-15 splits them the same
+# way.
+CLEAN_LIMIT = 12.0
+BUCKET = 2.0
+
+# wrist_roll is excluded everywhere on this arm (it runs away under
+# torque), so its divergence must not influence the choice of window.
+SKIP = {"wrist_roll"}
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    path = sys.argv[1]
+
+    spec = mujoco.MjSpec.from_file(str(BARE_SCENE))
+    widen_shoulder_lift(spec)
+    ranges = sim_joint_ranges_from_model(spec.compile())
+
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        print(f"{path}: no data rows", file=sys.stderr)
+        return 1
+
+    t0 = float(rows[0]["wall_time"])
+    judged = [j for j in JOINT_NAMES if j not in SKIP]
+
+    samples = []
+    for r in rows:
+        t = float(r["wall_time"]) - t0
+        rad = {j: math.radians(float(r[f"{j}_sim_qpos_deg"]))
+               for j in JOINT_NAMES}
+        sim_norm = sim_to_real_vector(rad, ranges)
+        worst = max(abs(sim_norm[j] - float(r[f"{j}_real_norm"]))
+                    for j in judged)
+        samples.append((t, worst, sim_norm))
+
+    duration = samples[-1][0]
+
+    # Contiguous runs of clean buckets.
+    clean = []
+    b = 0.0
+    while b < duration:
+        seg = [w for t, w, _ in samples if b <= t < b + BUCKET]
+        if seg and max(seg) < CLEAN_LIMIT:
+            clean.append((b, min(b + BUCKET, duration)))
+        b += BUCKET
+    if not clean:
+        print(f"{path}: no window under {CLEAN_LIMIT} units of divergence.\n"
+              "The whole recording is in fold territory -- re-record with "
+              "the arm out in open space.", file=sys.stderr)
+        return 1
+
+    runs = []
+    start, end = clean[0]
+    for a, z in clean[1:]:
+        if abs(a - end) < 1e-6:
+            end = z
+        else:
+            runs.append((start, end))
+            start, end = a, z
+    runs.append((start, end))
+    win_start, win_end = max(runs, key=lambda r: r[1] - r[0])
+
+    # Speed from the fastest per-tick step the window demands. The
+    # thresholds come from what this arm actually tracked: 1.04 units/tick
+    # needed 0.4, 2.17 needed 0.3, 1.46 ran at 0.4.
+    peak = 0.0
+    prev = None
+    for t, _, sim_norm in samples:
+        if not (win_start <= t <= win_end):
+            continue
+        if prev is not None:
+            peak = max(peak, max(abs(sim_norm[j] - prev[j])
+                                 for j in judged))
+        prev = sim_norm
+
+    if peak > 1.8:
+        speed = 0.3
+    elif peak > 1.2:
+        speed = 0.4
+    else:
+        speed = 0.5
+
+    print(f"{win_start:.0f} {win_end:.0f} {speed}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
