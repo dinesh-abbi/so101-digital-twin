@@ -323,18 +323,41 @@ the code:
    recordings, 24 in the last 2. The middle is always clean.
 4. **Return to rest and hold**, so the next session starts in position.
 
-### Why `--speed` matters, and what it measures
+### Why `--speed` matters — and a claim to NOT repeat
 
-Not a workaround — a measurement. On `simple_1.csv` the sim commanded
-`elbow_flex` down 71 units in 2.3 s and the real joint managed 25, about a
-third of the demanded rate. That is **not** the clamp (62 units/s demanded
-against the 240 a 4.0 clamp allows at 60 fps): it is the STS3215 lowering
-the forearm against gravity. MuJoCo's position actuators have no such
-trouble.
+Replays need 0.25–0.4×. The reason is **not known**, and one confident
+explanation was tested and disproved on 2026-09-10:
 
-**The speed at which a sim-sourced trajectory stops being trackable IS the
-sim-to-real gap for that motion.** Worth recording per trajectory rather
-than tuning away.
+> ~~The sim commands elbow_flex down 71 units in 2.3 s where the real
+> joint manages 25, so the STS3215 cannot lower the forearm as fast as
+> MuJoCo's actuators.~~ **Wrong.**
+
+The 25-unit figure came from a slow stepped probe, not from the arm moving
+freely. Comparing the sim against what the follower ACTUALLY did during
+each recording (the `*_real_norm` column) shows they already agree:
+
+| Recording | real arm moved | sim moves |
+|---|---:|---:|
+| `demo` | 57.8 | 57.6 |
+| `simple_1` | 68.0 | 68.1 |
+| `simple` | 21.6 | 17.9 |
+
+So the arm can move that fast, and the sim is not outrunning it.
+
+**Do not re-fit the actuator gains for this.** A force-limit patch and a
+`damping=12` fit were both built on the wrong premise and both made the
+match worse — damping=12 gives 25 units where reality does 58. The
+existing `kp=400 kv=25` fit is good; `so101.xml` is untouched.
+
+What remains true: a replay can abort on a LAGGING joint, and halving
+`--speed` fixes it. Why the same joint tracks fine while recording but
+falls behind while replaying is **open**. Untested candidates: the 4.0
+per-command clamp interacting with a fast descent, or the arm starting
+from a different pose than the recording did.
+
+To investigate properly, instrument the replay to log commanded vs
+measured per tick rather than theorising — three theories have now been
+wrong.
 
 ### Still open
 
