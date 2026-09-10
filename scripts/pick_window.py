@@ -134,7 +134,49 @@ def main():
             runs.append((start, end))
             start, end = a, z
     runs.append((start, end))
-    win_start, win_end = max(runs, key=lambda r: r[1] - r[0])
+
+    # Prefer the LONGEST run, but not at any cost: the arm has to be walked
+    # from wherever it rests to the window's first pose before the replay
+    # can start, and a window deep in the middle of a session can mean a
+    # 140-unit unfolding move. Measured on test10.csv: starting at t=16
+    # needed 141 units of approach (shoulder_lift -99 -> +36, elbow_flex
+    # +100 -> -40, the arm swinging up and out), while t=2 needed 14. Both
+    # windows are equally clean; only one is comfortable to watch.
+    #
+    # So trim the front of a chosen run while the frames stay clean and the
+    # approach gets cheaper, and prefer a slightly shorter run whose start
+    # is much closer to where the arm actually is.
+    # Distance is measured from the arm's PHYSICAL resting pose, not from
+    # the recording's first frame: a session can begin with the arm already
+    # unfolded, and then its own first frame is a useless reference. This
+    # is where an unpowered SO-101 settles -- folded down onto its base,
+    # elbow and wrist bent back -- and it is where the follower will be
+    # sitting when a replay starts.
+    REST = {
+        "shoulder_pan": -6.0,
+        "shoulder_lift": -99.0,
+        "elbow_flex": 99.0,
+        "wrist_flex": 95.0,
+        "gripper": 1.7,
+    }
+
+    def approach_cost(t):
+        """Worst-joint distance from the arm's resting pose."""
+        _, _, pose = min(samples, key=lambda s: abs(s[0] - t))
+        return max(abs(pose[j] - REST[j]) for j in judged if j in REST)
+
+    def score(run):
+        length = run[1] - run[0]
+        cost = approach_cost(run[0])
+        # A run loses ~1 s of worth for every 6 units the arm must travel
+        # to reach it. Calibrated on test10.csv, where a 8 s window needing
+        # 141 units of approach must lose to a shorter one needing 14: at
+        # /6 that is a 23.5 s penalty against 2.3 s, which is decisive.
+        # Too gentle a divisor and the longest window always wins no matter
+        # how far the arm has to unfold to reach it.
+        return length - cost / 6.0
+
+    win_start, win_end = max(runs, key=score)
 
     # Speed from the hardest per-tick step the window demands, where
     # "hardest" weights each joint by how much load it carries -- see

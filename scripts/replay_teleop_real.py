@@ -128,6 +128,14 @@ DIVERGENCE_LIMIT = 45.0
 # than a lunge.
 START_TOLERANCE = 5.0
 
+# The largest gap the default approach will close on its own. Beyond this
+# the arm is not "nudged into position", it is unfolded across most of its
+# range before the replay starts -- 140 units on one measured window, with
+# shoulder_lift and elbow_flex swinging the arm up and out together. Safe
+# in the rate-limited sense and still alarming to stand next to, so it
+# needs --force-approach said out loud.
+MAX_AUTO_APPROACH = 60.0
+
 WIRE_RADIUS = 0.004
 WIRE_RGBA = (0.05, 0.05, 0.05, 1.0)
 WIRE_SEGMENTS = (
@@ -279,6 +287,11 @@ def main():
                          "means the arm has to be repositioned first, so "
                          "refusing just moved the same motion to someone's "
                          "hands.")
+    ap.add_argument("--force-approach", action="store_true",
+                    help=f"Allow the approach to close a gap larger than "
+                         f"{60:.0f} units. Off by default: a very large "
+                         "approach unfolds most of the arm before the "
+                         "replay begins.")
     ap.add_argument("--approach-speed", type=float, default=1.5,
                     metavar="UNITS_PER_TICK",
                     help="How fast --approach closes the gap (default 1.5, "
@@ -486,7 +499,28 @@ def main():
                     "first,\n  or move it by hand with torque off, then "
                     "re-run.")
             if bad:
-                # --approach: close the gap as a ramp rather than a jump.
+                # However gentle the ramp, a very large approach means the
+                # arm unfolds most of its range before the replay even
+                # starts -- measured 140 units on one window (shoulder_lift
+                # -99 -> +36 and elbow_flex +100 -> -40 together, the arm
+                # swinging up and out). That is alarming to watch and not
+                # what anyone means by "replay this recording", so it needs
+                # saying yes to deliberately.
+                worst_gap = max(abs(here[j] - first[j]) for j in JOINT_NAMES
+                                if j not in skip)
+                if worst_gap > MAX_AUTO_APPROACH and not args.force_approach:
+                    raise SystemExit(
+                        f"\n  REFUSING: the arm is {worst_gap:.0f} units "
+                        f"from this window's start pose\n  (limit "
+                        f"{MAX_AUTO_APPROACH:.0f}). Walking it there would "
+                        "unfold most of the arm\n  before the replay "
+                        "begins.\n\n"
+                        "  Either pick a window that starts nearer where "
+                        "the arm rests --\n  pick_window.py already prefers "
+                        "one, so a manual --window may be\n  the reason -- "
+                        "or pass --force-approach if you want that motion.")
+
+                # Close the gap as a ramp rather than a jump.
                 # This is the same motion the start-pose gate exists to
                 # prevent, made safe by rate-limiting it: each tick moves at
                 # most --approach-speed units per joint, well under the
