@@ -276,6 +276,19 @@ def main():
                     metavar="UNITS_PER_TICK",
                     help="How fast --approach closes the gap (default 1.5, "
                          "well under the 4.0 clamp). Lower is gentler.")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="Playback speed. 0.5 replays at half rate, giving "
+                         "the servos twice as long to reach each command.\n"
+                         "WHY YOU MIGHT NEED THIS: a --source sim trajectory "
+                         "can be physically faster than the arm. Measured "
+                         "2026-09-10 on simple_1.csv: the sim commands "
+                         "elbow_flex down 71 units in 2.3 s, but the real "
+                         "joint managed only 25 in the same time -- about a "
+                         "third of the demanded rate. That is not the clamp "
+                         "(62 units/s demanded against 240 allowed), it is "
+                         "the servo lowering the forearm against gravity. "
+                         "Slowing playback fixes it; raising the clamp does "
+                         "not.")
     args = ap.parse_args()
 
     if args.source == "sim" and args.window is None:
@@ -324,6 +337,9 @@ def main():
               f"of {full_duration:.1f} s")
     print(f"  frames   : {len(frames)}  ({duration:.1f} s)")
     print(f"  mode     : {'DRY RUN (sim only)' if args.dry_run else 'REAL ARM + sim'}")
+    if args.speed != 1.0:
+        print(f"  speed    : {args.speed}x  "
+              f"({duration / args.speed:.1f} s wall clock)")
     print(f"  clamp    : {clamp if clamp is not None else 'DISABLED'}")
     if skip:
         print(f"  skipping : {', '.join(skip)}  (never commanded)")
@@ -628,7 +644,10 @@ def main():
                 was_colliding = is_col
 
             # Hold the recording's ORIGINAL wall-clock spacing.
-            sleep_for = (start_wall + t) - time.perf_counter()
+            # Dividing by --speed stretches the recording's own wall-clock
+            # spacing: 0.5 takes twice as long, so each command sits in
+            # front of the servo twice as long before the next arrives.
+            sleep_for = (start_wall + t / args.speed) - time.perf_counter()
             if sleep_for > 0:
                 time.sleep(sleep_for)
 
