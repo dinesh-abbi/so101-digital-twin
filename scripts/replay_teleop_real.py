@@ -63,9 +63,9 @@ import mujoco.viewer                             # noqa: E402
 
 from real_sim_joint_mapping import (             # noqa: E402
     JOINT_NAMES,
-    load_sim_joint_ranges_rad,
     real_to_sim_vector,
     sim_joint_ranges_from_model,
+    sim_to_real_vector,
     widen_shoulder_lift,
 )
 
@@ -138,15 +138,61 @@ def _add_wire_geoms(spec):
         )
 
 
-def load_frames(path):
+def load_frames(path, source="real", sim_ranges=None):
+    """Read a --record CSV into (t, {joint: normalised}) frames.
+
+    source="real" replays the *_real_norm column -- the arm's own past
+    positions. That proves the servos repeat a trajectory, which is useful
+    but is NOT a test of the simulation.
+
+    source="sim" replays *_sim_qpos_deg instead: where MuJoCo's physics
+    actually put each joint, converted back to normalised units through
+    the same mapping the forward direction uses. THIS is the twin test --
+    it asks whether the simulation is accurate enough to command the real
+    arm. Until this existed, MuJoCo had never driven the hardware.
+    """
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     if not rows:
         raise SystemExit(f"{path}: no data rows")
+
+    if source == "sim":
+        missing = [j for j in JOINT_NAMES
+                   if f"{j}_sim_qpos_deg" not in rows[0]]
+        if missing:
+            raise SystemExit(
+                f"{path}: no sim columns for {', '.join(missing)}.\n"
+                "  --source sim needs a CSV recorded WITH the sim running "
+                "(not --no-sim).")
+        if sim_ranges is None:
+            raise SystemExit("--source sim needs the compiled model's joint "
+                             "ranges (internal error)")
+
     t0 = float(rows[0]["wall_time"])
-    return [(float(r["wall_time"]) - t0,
-             {j: float(r[f"{j}_real_norm"]) for j in JOINT_NAMES})
-            for r in rows]
+    frames = []
+    for r in rows:
+        t = float(r["wall_time"]) - t0
+        if source == "sim":
+            rad = {j: math.radians(float(r[f"{j}_sim_qpos_deg"]))
+                   for j in JOINT_NAMES}
+            pose = sim_to_real_vector(rad, sim_ranges)
+        else:
+            pose = {j: float(r[f"{j}_real_norm"]) for j in JOINT_NAMES}
+        frames.append((t, pose))
+    return frames
+
+
+def window_frames(frames, window):
+    """Keep only frames inside [start, end] seconds, re-based to t=0."""
+    if window is None:
+        return frames
+    lo, hi = window
+    kept = [(t, p) for t, p in frames if lo <= t <= hi]
+    if not kept:
+        raise SystemExit(f"--window {lo} {hi}: no frames in that range "
+                         f"(recording is {frames[-1][0]:.1f} s long)")
+    base = kept[0][0]
+    return [(t - base, p) for t, p in kept]
 
 
 def check_trajectory(frames, clamp):
@@ -186,19 +232,113 @@ def main():
                     help="Robot only, no table. Implies --no-corner.")
     ap.add_argument("--no-sim", action="store_true",
                     help="Real arm only, no MuJoCo window.")
+    ap.add_argument("--source", choices=("real", "sim"), default="real",
+                    help="Which column drives the arm. 'real' (default) "
+                         "sends the follower's own past positions -- proves "
+                         "the servos repeat a trajectory. 'sim' sends where "
+                         "MUJOCO put each joint, converted back through the "
+                         "mapping: the actual twin test of whether the "
+                         "simulation is accurate enough to command real "
+                         "hardware.")
+    ap.add_argument("--window", nargs=2, type=float, metavar=("START", "END"),
+                    help="Replay only this slice of the recording, in "
+                         "seconds. REQUIRED with --source sim: the folded "
+                         "ends of a session are exactly where sim and real "
+                         "diverge most (19-40 deg), and those frames must "
+                         "not be sent to hardware.")
+    ap.add_argument("--skip-joints", default="",
+                    help="Comma-separated joints to leave uncommanded, e.g. "
+                         "--skip-joints wrist_roll. They are still read and "
+                         "compared, just never driven -- for a joint with a "
+                         "known fault.")
     args = ap.parse_args()
 
+    if args.source == "sim" and args.window is None:
+        raise SystemExit(
+            "\n  --source sim requires --window START END.\n"
+            "  MuJoCo has never driven this hardware before, and a "
+            "recording's folded\n  ends diverge 19-40 deg between sim and "
+            "real. Pick the clean middle:\n"
+            "    run with --dry-run first, read the divergence table it "
+            "prints,\n    then choose a window where every joint stays "
+            "close.")
+
+    skip = [j.strip() for j in args.skip_joints.split(",") if j.strip()]
+    bad = [j for j in skip if j not in JOINT_NAMES]
+    if bad:
+        raise SystemExit(f"--skip-joints: unknown joint(s) {', '.join(bad)}")
+
     clamp = None if args.max_relative_target < 0 else args.max_relative_target
-    frames = load_frames(args.csv_path)
+
+    # --source sim converts sim_qpos_deg back through the mapping, which
+    # needs the COMPILED model's joint ranges (post-widening) -- so build a
+    # throwaway model here rather than reading the XML, for the same reason
+    # sim_joint_ranges_from_model exists at all.
+    _ranges_for_load = None
+    if args.source == "sim":
+        _spec = mujoco.MjSpec.from_file(
+            str(BARE_SCENE_PATH if args.bare else SCENE_PATH))
+        widen_shoulder_lift(_spec)
+        _ranges_for_load = sim_joint_ranges_from_model(_spec.compile())
+
+    frames = load_frames(args.csv_path, args.source, _ranges_for_load)
+    full_duration = frames[-1][0]
+    frames = window_frames(frames, args.window)
     duration = frames[-1][0]
 
     print("=" * 70)
     print("  Replay recorded session -> real follower + MuJoCo mirror")
     print("=" * 70)
     print(f"  csv      : {args.csv_path}")
+    print(f"  source   : {args.source.upper()}"
+          + ("   <-- MuJoCo is driving the hardware"
+             if args.source == "sim" else
+             "  (the arm's own past positions)"))
+    if args.window:
+        print(f"  window   : {args.window[0]:.1f}..{args.window[1]:.1f} s "
+              f"of {full_duration:.1f} s")
     print(f"  frames   : {len(frames)}  ({duration:.1f} s)")
     print(f"  mode     : {'DRY RUN (sim only)' if args.dry_run else 'REAL ARM + sim'}")
     print(f"  clamp    : {clamp if clamp is not None else 'DISABLED'}")
+    if skip:
+        print(f"  skipping : {', '.join(skip)}  (never commanded)")
+
+    # ---- Sim-vs-real divergence, before anything is energised. This is
+    # the number --source sim exists to expose: how far MuJoCo's idea of
+    # each joint sits from where the real arm actually was.
+    if args.source == "sim" and _ranges_for_load is not None:
+        _rows = list(csv.DictReader(open(args.csv_path, newline="")))
+        _t0 = float(_rows[0]["wall_time"])
+        _lo, _hi = (args.window if args.window else (0.0, full_duration))
+        _diffs = {j: [] for j in JOINT_NAMES}
+        for _r in _rows:
+            _t = float(_r["wall_time"]) - _t0
+            if not (_lo <= _t <= _hi):
+                continue
+            _rad = {j: math.radians(float(_r[f"{j}_sim_qpos_deg"]))
+                    for j in JOINT_NAMES}
+            _simnorm = sim_to_real_vector(_rad, _ranges_for_load)
+            for j in JOINT_NAMES:
+                _diffs[j].append(abs(_simnorm[j]
+                                     - float(_r[f"{j}_real_norm"])))
+        print("\n  Sim vs real over this window (normalised units):")
+        print(f"    {'joint':<15}{'mean':>8}{'max':>8}")
+        _worst_j, _worst_v = None, 0.0
+        for j in JOINT_NAMES:
+            if not _diffs[j]:
+                continue
+            _m = sum(_diffs[j]) / len(_diffs[j])
+            _x = max(_diffs[j])
+            if _x > _worst_v:
+                _worst_j, _worst_v = j, _x
+            print(f"    {j:<15}{_m:>8.2f}{_x:>8.2f}"
+                  + ("   <-- large" if _x > 15 else ""))
+        if _worst_v > 25:
+            raise SystemExit(
+                f"\n  REFUSING: {_worst_j} diverges {_worst_v:.1f} units "
+                "between sim and real\n  in this window. Sending that to "
+                "the arm would command a pose the real\n  robot never held. "
+                "Pick a tighter --window.")
 
     # ---- Pre-flight: does the file itself fit inside the clamp? --------
     worst, over = check_trajectory(frames, clamp)
@@ -279,6 +419,10 @@ def main():
             bad = []
             for j in JOINT_NAMES:
                 d = abs(here[j] - first[j])
+                if j in skip:
+                    print(f"    {j:<14} arm {here[j]:+7.2f}   csv "
+                          f"{first[j]:+7.2f}   diff {d:5.2f}   (skipped)")
+                    continue
                 mark = "  <-- TOO FAR" if d > START_TOLERANCE else ""
                 print(f"    {j:<14} arm {here[j]:+7.2f}   csv "
                       f"{first[j]:+7.2f}   diff {d:5.2f}{mark}")
@@ -326,7 +470,15 @@ def main():
                 break
 
             if follower is not None:
-                action = {f"{j}.pos": pose[j] for j in JOINT_NAMES}
+                # Skipped joints are commanded to hold where they are, not
+                # omitted -- LeRobot sends the whole action dict, and a
+                # missing joint would simply keep its last goal rather than
+                # actively holding.
+                action = {f"{j}.pos": pose[j] for j in JOINT_NAMES
+                          if j not in skip}
+                for _sj in skip:
+                    action[f"{_sj}.pos"] = float(
+                        follower.get_observation()[f"{_sj}.pos"])
                 action["gripper.pos"] = min(GRIPPER_MAX, action["gripper.pos"])
                 follower.send_action(action)
                 obs = follower.get_observation()
@@ -358,6 +510,8 @@ def main():
                 # the joint is not tracking -- jammed, unpowered, or running
                 # open-loop -- and continuing to send only makes it worse.
                 for j in JOINT_NAMES:
+                    if j in skip:
+                        continue
                     gap = abs(measured[j] - action[f"{j}.pos"])
                     if gap > DIVERGENCE_LIMIT:
                         abort_reason = (

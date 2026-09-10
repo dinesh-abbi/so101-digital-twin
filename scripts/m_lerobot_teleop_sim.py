@@ -271,6 +271,22 @@ def parse_args():
                          "and sim qpos -- for all 6 joints. ctrl-vs-real "
                          "isolates the MAPPING; qpos-vs-real includes the "
                          "PHYSICS fit (kp/kv). Requires --sim (the default).")
+    ap.add_argument("--freeze", default="", metavar="JOINTS",
+                    help="Comma-separated joints to hold at their STARTING "
+                         "position instead of following the leader, e.g. "
+                         "--freeze wrist_roll. They are still read, logged "
+                         "and mirrored in sim -- only the command is "
+                         "suppressed.\n"
+                         "WHY THIS EXISTS (2026-09-10): this arm's "
+                         "wrist_roll creeps ~0.05 units/tick under torque "
+                         "even when commanded to hold a constant value. It "
+                         "is mechanically free (zero drift with torque off) "
+                         "and its calibration is current, but it is the one "
+                         "joint whose calibrated range is the FULL encoder "
+                         "(0..4095, no hard stop), so it has no reference "
+                         "to settle against and nothing stops it wrapping. "
+                         "Freezing it lets the other five joints do useful "
+                         "work while that is unresolved.")
     return ap.parse_args()
 
 
@@ -455,6 +471,24 @@ def main():
         roll_traveled = 0.0
         roll_prev = None
         abort_reason = None
+
+        # ---- Frozen joints. Latch where each one is RIGHT NOW and keep
+        # commanding exactly that, so it is actively held rather than left
+        # to drift. Latched here (after connect, before the loop) rather
+        # than from the leader, because the whole point is to ignore what
+        # the leader says for these.
+        frozen = [j.strip() for j in args.freeze.split(",") if j.strip()]
+        bad_freeze = [j for j in frozen if j not in JOINT_NAMES]
+        if bad_freeze:
+            raise SystemExit(
+                f"--freeze: unknown joint(s) {', '.join(bad_freeze)}.\n"
+                f"  Valid: {', '.join(JOINT_NAMES)}")
+        _obs0 = follower.get_observation()
+        frozen_at = {j: float(_obs0[f"{j}.pos"]) for j in frozen}
+        if frozen:
+            print("\n  FROZEN (held, not following the leader):")
+            for j in frozen:
+                print(f"    {j:<14} held at {frozen_at[j]:+7.2f}")
         while True:
             loop_start = time.perf_counter()
 
@@ -479,10 +513,23 @@ def main():
                 robot_action_to_send["gripper.pos"] = min(
                     GRIPPER_MAX, robot_action_to_send["gripper.pos"])
 
+            # ---- Frozen joints: command the position they started at,
+            # every tick, so the servo actively holds rather than being
+            # left to drift. The leader's value for these is still read
+            # and still logged -- only the command is overridden.
+            for _fj in frozen:
+                robot_action_to_send[f"{_fj}.pos"] = frozen_at[_fj]
+
             # ---- Runaway guards. See WRIST_ROLL_TRAVEL_CAP at the top
             # for the incident these exist to stop. Checked BEFORE
             # send_action, so a joint already running away is not
             # commanded again.
+            # A frozen wrist_roll is deliberately not following the leader,
+            # but it can still physically run away -- that is exactly the
+            # fault being worked around -- so the travel cap stays live for
+            # it. Only the divergence check is skipped for frozen joints
+            # (see below), since "not matching the leader" is intended
+            # there and would trip every tick.
             roll_now = float(obs["wrist_roll.pos"])
             if roll_prev is not None:
                 step = abs(roll_now - roll_prev)
@@ -504,6 +551,11 @@ def main():
             for _j in JOINT_NAMES:
                 _cmd = robot_action_to_send.get(f"{_j}.pos")
                 if _cmd is None:
+                    continue
+                if _j in frozen_at:
+                    # Held on purpose. It is measured against its own latched
+                    # target, not the leader, and a frozen joint that drifts
+                    # is caught by the travel cap above.
                     continue
                 _gap = abs(float(obs[f"{_j}.pos"]) - float(_cmd))
                 # wrist_roll's wrap makes a legitimate reading look 200
