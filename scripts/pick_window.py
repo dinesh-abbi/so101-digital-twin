@@ -56,6 +56,29 @@ BUCKET = 2.0
 # torque), so its divergence must not influence the choice of window.
 SKIP = {"wrist_roll"}
 
+# How hard each joint finds a given step rate, relative to a light one.
+# A raw peak step rate is the wrong thing to pick speed from, because the
+# same units/tick is trivial for the wrist and near-impossible for the
+# shoulder. Measured on this arm:
+#
+#   simple_1   elbow_flex    peak 1.04  ->  ran at 0.4
+#   dataset_1  (no abort)    peak 1.46  ->  ran at 0.3
+#   dataset_2  shoulder_lift peak 1.17  ->  ABORTED at 0.4
+#
+# dataset_2 has the LOWEST shoulder_lift peak of the three and still
+# failed, because the picker was reading wrist_flex's 1.46 instead. These
+# weights come from the arm's own holding current: CLAUDE.md records
+# shoulder_lift drawing 2.4x elbow_flex's, and it is the joint that lifts
+# everything distal to it.
+LOAD_WEIGHT = {
+    "shoulder_lift": 2.4,   # carries the whole arm
+    "elbow_flex": 1.4,      # carries the forearm and gripper
+    "shoulder_pan": 1.0,    # rotates about vertical -- gravity-neutral
+    "wrist_flex": 0.8,
+    "wrist_roll": 0.5,
+    "gripper": 0.5,
+}
+
 
 def main():
     if len(sys.argv) != 2:
@@ -113,20 +136,29 @@ def main():
     runs.append((start, end))
     win_start, win_end = max(runs, key=lambda r: r[1] - r[0])
 
-    # Speed from the fastest per-tick step the window demands. The
-    # thresholds come from what this arm actually tracked: 1.04 units/tick
-    # needed 0.4, 2.17 needed 0.3, 1.46 ran at 0.4.
+    # Speed from the hardest per-tick step the window demands, where
+    # "hardest" weights each joint by how much load it carries -- see
+    # LOAD_WEIGHT. Picking on the raw peak reads the fastest joint rather
+    # than the most burdened one, which is how dataset_2 was given 0.4 and
+    # aborted on shoulder_lift.
     peak = 0.0
+    peak_joint = None
     prev = None
     for t, _, sim_norm in samples:
         if not (win_start <= t <= win_end):
             continue
         if prev is not None:
-            peak = max(peak, max(abs(sim_norm[j] - prev[j])
-                                 for j in judged))
+            for j in judged:
+                w = abs(sim_norm[j] - prev[j]) * LOAD_WEIGHT.get(j, 1.0)
+                if w > peak:
+                    peak, peak_joint = w, j
         prev = sim_norm
 
-    if peak > 1.8:
+    # Thresholds against the WEIGHTED peak. dataset_2 scores 1.17 * 2.4 =
+    # 2.81 on shoulder_lift, which lands it at 0.25 -- the speed it needed.
+    if peak > 2.5:
+        speed = 0.25
+    elif peak > 1.8:
         speed = 0.3
     elif peak > 1.2:
         speed = 0.4
