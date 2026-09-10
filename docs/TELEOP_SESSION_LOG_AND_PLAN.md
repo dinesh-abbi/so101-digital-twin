@@ -24,6 +24,13 @@ debugging, not a substitute for either.
 | Accuracy plots | `plot_teleop_accuracy.py` | real vs sim + error trace |
 | Replay to sim only | `replay_teleop_sim.py` | no hardware touched |
 | Replay to real + sim | `replay_teleop_real.py` | start-pose gate + pre-flight |
+| Workspace analysis | `analyze_workspace.py` | FK a recording, find grasp points |
+| Cube scene + cameras | `robot_cube_test/` | 16/16 headless checks |
+
+**Not working yet:** `robot_cube_test/grasp_cube.py` reaches the cube but
+does not lift it (wrist orientation — see the 2026-09-10 session notes).
+`replay_teleop_real.py` still has no `--source sim`, so **MuJoCo has never
+driven the hardware.**
 
 **Best measured accuracy** (`teleop_log_pick2.csv`, 60 fps, 33.5 s):
 
@@ -259,7 +266,139 @@ better dataset than a short one of real motion.
 
 ---
 
-## Today's plan (2026-09-10)
+## Session 2026-09-10 (afternoon): the cube — what actually happened
+
+Ran plan item 1 below. **The scene, cameras and analysis tooling are done
+and committed; the grasp itself is NOT working.** The prediction in that
+plan — "expect the tuning to be in grasp contact, not setup" — turned out
+to be wrong in an instructive way, and that is the main result of the
+session.
+
+### THE HEADLINE: a recorded teleop session can never grasp anything
+
+Not a tuning problem. Not fixable with friction, `solref`, `solimp`,
+`condim`, or cube mass. **Measured across 8 cube sizes from 0.6 cm to
+1.8 cm — none were lifted, at any size.**
+
+Two gaps constrain the problem, and the second is the one that is easy to
+miss:
+
+**(1) The open gap** — how wide the jaws ever get. Tip-to-tip separation
+vs the gripper's normalised command, read off the compiled model:
+
+| gripper norm | jaw gap | |
+|---:|---:|---|
+| 1.7 | 0.6 cm | fully closed — where every recorded session starts |
+| 21.2 | 3.4 cm | **the widest any recorded session opens** |
+| 40 | 6.0 cm | first setting that clears a 5 cm cube |
+
+**(2) The approach gap** — the real killer. The arm does **not** approach
+with the gripper open. From `teleop_log_pick2.csv`, frame by frame:
+
+```
+t=23.0   arrives at the target, gripper 11.19  ->  gap 1.93 cm
+t=23-25  sits there, still 1.93 cm
+t=25.5   OPENS to 21.0                         ->  gap 3.38 cm
+t=26.0   closes
+t=26.5   fully shut                            ->  gap 0.59 cm
+```
+
+The jaws travel **into** the grasp position while only 1.93 cm apart, then
+open around the object in place. So:
+
+- any cube wide enough to be gripped is **bulldozed ~3 s before the
+  grasp**, at t=22.7;
+- any cube narrow enough to survive that **slips through the 0.59 cm
+  closed jaws**.
+
+The window between those two is empty. And the failure *looks* exactly
+like bad contact tuning — the cube skitters away on contact — which is why
+it is worth writing down. **Check both gaps before touching contact
+parameters.** No friction value lets a cube pass through a gap narrower
+than itself.
+
+**Why the recordings are like this:** they were made with no object
+present. There was nothing to avoid and nothing to open around, so the
+operator drove the shape that felt natural against thin air.
+
+**What to do differently when recording a graspable session:**
+
+1. **Open the gripper wide BEFORE approaching** — 40+ normalised units,
+   not 21.
+2. **Approach from above**, descending onto the object, rather than
+   sweeping in horizontally at object height.
+3. Keep the jaws open until the object is between them.
+
+### What was built and works
+
+| Thing | Status |
+|---|---|
+| `scripts/analyze_workspace.py` | **works** — FK a recording, report where the gripper went and when it closed |
+| `robot_cube_test/robot_cube_scene.xml` | **works** — bare scene + 2 cm cube + 3 cameras |
+| `robot_cube_test/validate_robot_cube.py` | **works** — 16/16 headless checks pass |
+| `replay_teleop_sim.py --cube` | **works** — replays into the cube scene, measures and reports lift |
+| `robot_cube_test/grasp_cube.py` | **INCOMPLETE** — see below |
+
+Cube is **2 cm**, matching the real bench cube (measured 2026-09-10), not
+M2's 5 cm test cube. Cameras `overhead`, `grasp_view`, `workspace` all
+verified to render real images — on this Intel HD 620 that is a separate
+fact from being *defined*, so the validator checks both.
+
+Where the recordings actually close the jaws, from `analyze_workspace.py`:
+
+| Session | x | y | z |
+|---|---:|---:|---:|
+| `teleop_log_pick2.csv` | +0.373 | +0.027 | 0.094 (jaw midpoint) |
+| `teleop_log_pick3.csv` | +0.359 | +0.022 | 0.103 (site frame) |
+| `teleop_log_60fps.csv` | +0.347 | +0.020 | 0.069 (site frame) |
+
+Note the `gripperframe` site sits ~2 cm above the jaw tips — do not use it
+as the grasp point.
+
+### `grasp_cube.py` — unfinished, and exactly where it stops
+
+A scripted pick (open → hover above → descend → close → lift) that does
+**not** yet lift the cube. Current state: the IK reaches the cube cleanly
+(residual ~3 mm) and the cube twitches +0.3 cm on contact, but is never
+held.
+
+**Root cause, seen in a render:** the gripper arrives with the jaws
+rotated into the wrong plane — the cube ends up *beside* the jaws rather
+than between them, and the moving jaw swings toward the floor instead of
+over the object. It is a wrist-orientation problem, not contact physics.
+
+Two IK traps already found and worth not repeating:
+
+1. **Targeting the jaw MIDPOINT with orientation unconstrained does not
+   work.** With the jaws open the tips are ~5 cm apart, so "midpoint on
+   the cube" is satisfied by poses with one jaw on the cube and the other
+   6.5 cm away in mid-air. Measured: IK residual 0.03 mm, cube never
+   moved.
+2. **The pitch constraint introduces local minima.** Sweeping the target x
+   gave 6 mm residuals at x=0.32 and x=0.36 but 110–170 mm at neighbouring
+   values — bad starting guesses, not unreachable poses. `ik_solve()` now
+   seeds several starts and keeps the best.
+
+Also measured: a **top-down straddle is only achievable beyond x≈0.30**.
+Below that the wrist cannot pitch over. The cube sits at x=0.32 for this
+reason.
+
+**Next step when resuming:** constrain the gripper's *roll* as well as its
+pitch, so the jaw opening plane contains the cube. The position and pitch
+rows are already in the Jacobian; a third orientation row is the likely
+fix.
+
+### Not done this session
+
+- **Sim → real (`--source sim`)** — plan item 2 below, untouched. MuJoCo
+  still has never driven the hardware.
+- **Frame capture to disk** — cameras render, but nothing writes a
+  PNG+state dataset yet.
+- **Real cube / vision** — still Phase B, still unstarted.
+
+---
+
+## Original plan for 2026-09-10
 
 Ordered so each step is independently useful.
 
@@ -280,6 +419,11 @@ physics, while teleop drives the arm.
 - Validate by replaying `teleop_log_pick2.csv` (a real pick-and-place,
   gripper travel 16.1 units) and checking the sim cube gets picked up.
 
+> **Outcome: the last two bullets were both wrong.** The tuning is not in
+> grasp contact, and `teleop_log_pick2.csv` cannot validate anything —
+> see the session notes above. The 5 cm cube is also far too big: the
+> jaws never open past 3.4 cm in any recording.
+
 **Not** version B (sim cube mirroring the *real* cube's position) — that
 needs vision, which is Phase B and unstarted.
 
@@ -296,13 +440,16 @@ Gate it to the clean middle of a recording — the folded ends diverge
 
 ### 3. Housekeeping
 
-- **Commit.** 12 untracked files including all the new tooling; nothing
-  from the last two days is in git.
-- **Recordings are scattered** — several sit in
-  `scripts/digital_twin_env/robot_clamped_test/` because that was the cwd.
-  Move to one `recordings/` folder.
+- ~~**Commit.** 12 untracked files including all the new tooling; nothing
+  from the last two days is in git.~~ **DONE** — `1b7e12f`.
+- ~~**Recordings are scattered** — several sit in
+  `scripts/digital_twin_env/robot_clamped_test/` because that was the
+  cwd. Move to one `recordings/` folder.~~ **DONE** — all in
+  `recordings/`, which is gitignored.
 - Fold `--bare`, `--wires`, `--record`, `--fps 60` and the replay scripts
-  into `LEADER_TELEOP_RUNBOOK.md` and `twin.py`.
+  into `LEADER_TELEOP_RUNBOOK.md` and `twin.py`. **Still open** —
+  `analyze_workspace.py`, `validate_robot_cube.py` and `grasp_cube.py`
+  are not registered in `twin.py` either.
 
 ### Deferred
 
@@ -333,6 +480,16 @@ D:\robotics\so101-digital-twin\.venv\Scripts\python.exe `
 ...\python.exe scripts\replay_teleop_sim.py <csv> --bare --wires
 ...\python.exe scripts\replay_teleop_real.py <csv> `
   --follower-port COM14 --follower-id twin_follower_3 --bare --wires --fps 60
+
+# where did the gripper actually go in a recording, and when did it close?
+...\python.exe scripts\analyze_workspace.py recordings\teleop_log_pick2.csv
+
+# cube scene: headless checks, then replay a session into it
+...\python.exe scripts\digital_twin_env\robot_cube_test\validate_robot_cube.py
+...\python.exe scripts\replay_teleop_sim.py recordings\teleop_log_pick2.csv --cube --wires
+
+# scripted grasp (DOES NOT LIFT YET -- see the 2026-09-10 session notes)
+...\python.exe scripts\digital_twin_env\robot_cube_test\grasp_cube.py --headless
 ```
 
 **Ports move between plug-ins.** Re-check every session — the stable ids
