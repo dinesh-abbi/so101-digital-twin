@@ -523,15 +523,19 @@ def main():
                 # swinging up and out). That is alarming to watch and not
                 # what anyone means by "replay this recording", so it needs
                 # saying yes to deliberately.
-                worst_gap = max(abs(here[j] - first[j]) for j in JOINT_NAMES
-                                if j not in skip)
+                weighted = {j: abs(here[j] - first[j])
+                            * APPROACH_WEIGHT.get(j, 1.0)
+                            for j in JOINT_NAMES if j not in skip}
+                worst_j = max(weighted, key=weighted.get)
+                worst_gap = weighted[worst_j]
                 if worst_gap > MAX_AUTO_APPROACH and not args.force_approach:
                     raise SystemExit(
-                        f"\n  REFUSING: the arm is {worst_gap:.0f} units "
-                        f"from this window's start pose\n  (limit "
-                        f"{MAX_AUTO_APPROACH:.0f}). Walking it there would "
-                        "unfold most of the arm\n  before the replay "
-                        "begins.\n\n"
+                        f"\n  REFUSING: reaching this window's start pose "
+                        f"needs "
+                        f"{abs(here[worst_j] - first[worst_j]):.0f} units on"
+                        f"\n  {worst_j} (weighted {worst_gap:.0f}, limit "
+                        f"{MAX_AUTO_APPROACH:.0f}). That would unfold most "
+                        "of the arm\n  before the replay begins.\n\n"
                         "  Either pick a window that starts nearer where "
                         "the arm rests --\n  pick_window.py already prefers "
                         "one, so a manual --window may be\n  the reason -- "
@@ -561,21 +565,35 @@ def main():
                         if j in skip:
                             cmd[f"{j}.pos"] = cur[j]
                             continue
+                        # Step each joint at a rate it can actually manage.
+                        # A single rate for all six stalls the loaded ones:
+                        # measured on demo.csv, wrist_flex closed a 60-unit
+                        # gap while elbow_flex stuck at 12, because it was
+                        # being asked to lower the forearm at the same
+                        # 1.5 units/tick as a joint carrying nothing.
+                        rate = args.approach_speed / APPROACH_WEIGHT.get(
+                            j, 1.0)
                         d = remaining[j]
-                        cmd[f"{j}.pos"] = cur[j] + max(
-                            -args.approach_speed,
-                            min(args.approach_speed, d))
+                        cmd[f"{j}.pos"] = cur[j] + max(-rate, min(rate, d))
                     cmd["gripper.pos"] = min(GRIPPER_MAX, cmd["gripper.pos"])
                     follower.send_action(cmd)
                     if _step % 20 == 0:
-                        print(f"\r    worst gap {worst:6.2f} units", end="",
-                              flush=True)
+                        stuck = max(remaining, key=lambda j: abs(remaining[j]))
+                        print(f"\r    worst gap {worst:6.2f} units "
+                              f"({stuck})      ", end="", flush=True)
                     time.sleep(1.0 / args.fps)
                 else:
+                    stuck = max(remaining, key=lambda j: abs(remaining[j]))
                     raise SystemExit(
-                        "\n\n  --approach did not converge in 2000 steps. "
-                        "The arm is not\n  reaching the start pose -- check "
-                        "for an obstruction before retrying.")
+                        f"\n\n  APPROACH STALLED: {stuck} stopped "
+                        f"{abs(remaining[stuck]):.1f} units short of its "
+                        f"target\n  ({cur[stuck]:+.1f}, needs "
+                        f"{goal[stuck]:+.1f}).\n\n"
+                        "  It is being commanded but not arriving. Usually "
+                        "that means the joint\n  cannot hold the arm's "
+                        "weight at that angle -- try a window whose start "
+                        "pose\n  is closer to where the arm rests, or move "
+                        f"{stuck} there by hand with\n  the power off.")
                 obs = follower.get_observation()
                 here = {j: float(obs[f"{j}.pos"]) for j in JOINT_NAMES}
                 print(f"\r    worst gap {max(abs(here[j] - first[j]) for j in JOINT_NAMES if j not in skip):6.2f} units -- in position.   ")

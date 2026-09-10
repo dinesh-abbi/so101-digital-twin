@@ -180,9 +180,18 @@ def main():
     }
 
     def approach_cost(t):
-        """Worst-joint distance from the arm's resting pose."""
+        """Load-weighted worst-joint distance from the arm's rest pose.
+
+        Weighted for the same reason the speed is: 60 units of wrist_flex
+        is a wrist bend, 60 units of shoulder_lift swings the whole arm,
+        and the approach walk finds the second far harder. Measured on
+        demo.csv, an approach needing 12 units of elbow_flex STALLED --
+        the joint could not lower the forearm to that angle -- while a
+        60-unit wrist_flex move in the same approach completed fine.
+        """
         _, _, pose = min(samples, key=lambda s: abs(s[0] - t))
-        return max(abs(pose[j] - REST[j]) for j in judged if j in REST)
+        return max(abs(pose[j] - REST[j]) * LOAD_WEIGHT.get(j, 1.0)
+                   for j in judged if j in REST)
 
     def score(run):
         length = run[1] - run[0]
