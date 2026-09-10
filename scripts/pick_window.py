@@ -137,10 +137,17 @@ def main():
               "the arm out in open space.", file=sys.stderr)
         return 1
 
+    # Join runs separated by a SINGLE dirty bucket. A lone marginal bucket
+    # is usually a brief self-collision flicker mid-motion, not a real
+    # boundary, and cutting there can amputate something worth replaying:
+    # measured on simple.csv, the bucket at t=36 scores 12.2 against a 12.0
+    # threshold and the arm's whole return to home sits at t=38-40 just
+    # past it. Two or more dirty buckets in a row is a genuine fold and
+    # still splits the runs.
     runs = []
     start, end = clean[0]
     for a, z in clean[1:]:
-        if abs(a - end) < 1e-6:
+        if a - end < BUCKET * 1.5:      # touching, or one bucket apart
             end = z
         else:
             runs.append((start, end))
