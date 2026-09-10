@@ -35,6 +35,15 @@ machine has since built substantially past it (M6, M7, Task 1/2,
   real/sim lag is mostly correct, what changes when arms or the table are
   swapped, and a symptom→cause table. Written from the session where each
   of those failure modes actually happened
+- `docs/TELEOP_SESSION_LOG_AND_PLAN.md` — **read before re-attempting
+  anything to do with the sim table, self-collision, or teleop lag.** The
+  2026-09-08→10 debugging log as problem → attempt → outcome, including
+  the fixes that were tried and REVERTED (raising the base, lowering the
+  table, making the table solid, tuning contact stiffness) and why each
+  failed. Also records what the `shoulder_lift` widening actually needed
+  (both the joint range and the actuator `ctrlrange`, plus reading ranges
+  from the compiled model rather than the XML), and why 60 fps — not a
+  faster PC — was the fix for real/sim lag
 - `docs/MOTOR_CHECK_AND_MAPPING_SIMPLE.md` — per-motor table (all 6 IDs,
   ranges, which have been behavior-tested), simple explanation first
 - `docs/REAL_SIM_MAPPING_DEEP_DIVE.md` — full technical writeup of the

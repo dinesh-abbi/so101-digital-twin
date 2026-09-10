@@ -1,0 +1,92 @@
+<mujoco model="so101_clamped_table_scene">
+  <!-- Real-setup parity scene: SO-101 clamped to the table edge, with
+       cables. Copied from ../robot_corner_test/robot_corner_scene.xml and
+       extended with the clamp body; the table/floor/light geometry below is
+       unchanged from that scene so the two stay visually comparable.
+
+       Same two constraints as the corner scene, both still in force here:
+
+       1. so101.xml is spliced in by <include> (literal text splice, not a
+          scoped import) and cannot be wrapped in a positioning <body> --
+          it carries its own <option>/<compiler>/<default>, illegal once
+          nested. So the robot's EDGE placement is NOT set here; it is
+          applied after load via model.body_pos/body_quat[base], exactly as
+          robot_corner_test/run_robot_corner.py documents and
+          m_lerobot_teleop_sim.py already does.
+
+       2. so101.xml is never edited -- every scene includes it.
+
+       The CLAMP, unlike the robot, is ordinary scene geometry with a
+       positionable parent, so it lives here in the XML. Its numbers are
+       mirrored in run_robot_clamped.py's CONFIG block; that script is the
+       one obvious place to change them (it rewrites these geoms through
+       MjSpec before compiling), so edit there, not here.
+
+       COLLISION: every clamp geom is contype=0 conaffinity=0 -- visual
+       only. The clamp overlaps the robot's base mesh on purpose (that is
+       what clamping looks like), so giving it collision would generate
+       permanent base-vs-clamp contacts and could jam tracking the same way
+       the table-vs-arm contacts did. See run_robot_clamped.py. -->
+
+  <compiler angle="radian" autolimits="true" meshdir="../../../so101_assets/assets"/>
+
+  <include file="../../../so101_assets/so101.xml"/>
+
+  <visual>
+    <headlight diffuse="0.3 0.3 0.3" ambient="0.4 0.4 0.4" specular="0.1 0.1 0.1"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <material name="table_white_mat" rgba="0.92 0.92 0.90 1" specular="0.15" shininess="0.2" reflectance="0.05"/>
+    <material name="floor_mat" rgba="0.55 0.55 0.55 1" specular="0.05" shininess="0.0"/>
+    <material name="clamp_mat" rgba="0.25 0.25 0.28 1" specular="0.6" shininess="0.7" reflectance="0.15"/>
+    <material name="clamp_screw_mat" rgba="0.55 0.55 0.58 1" specular="0.8" shininess="0.8" reflectance="0.25"/>
+  </asset>
+
+  <default>
+    <default class="table_collision">
+      <geom contype="1" conaffinity="1" condim="3" friction="0.6 0.01 0.001" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+    </default>
+    <!-- Visual-only: no collision, no mass contribution to contacts. -->
+    <default class="clamp_visual">
+      <geom contype="0" conaffinity="0" group="1" material="clamp_mat"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="top_light" pos="0 0 1.8" dir="0 0 -1" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1" castshadow="true"/>
+
+    <camera name="table_view" pos="0.9 -0.9 0.6" xyaxes="0.707 0.707 0 -0.4 0.4 0.82"/>
+
+    <geom name="floor" type="plane" size="2.5 2.5 0.05" pos="0 0 -0.74" material="floor_mat" class="table_collision"/>
+
+    <body name="table" pos="0 0 -0.74">
+      <geom name="tabletop" type="box" size="0.50 0.30 0.015" pos="0 0 0.725"
+            material="table_white_mat" class="table_collision"/>
+
+      <geom name="table_leg_front_left" type="cylinder" size="0.025 0.355" pos="0.42 0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_front_right" type="cylinder" size="0.025 0.355" pos="0.42 -0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_back_left" type="cylinder" size="0.025 0.355" pos="-0.42 0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_back_right" type="cylinder" size="0.025 0.355" pos="-0.42 -0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+    </body>
+
+    <!-- C-clamp gripping the table edge under the robot's base plate.
+         Positions/sizes here are placeholders overwritten by
+         run_robot_clamped.py's CONFIG block before compile. -->
+    <body name="clamp" pos="0 -0.264 0">
+      <geom name="clamp_top_pad" class="clamp_visual" type="box" size="0.030 0.026 0.005" pos="0 0 -0.005"/>
+      <geom name="clamp_spine" class="clamp_visual" type="box" size="0.030 0.008 0.035" pos="0 -0.034 -0.035"/>
+      <geom name="clamp_bottom_jaw" class="clamp_visual" type="box" size="0.030 0.026 0.005" pos="0 0 -0.065"/>
+      <geom name="clamp_screw" class="clamp_visual" type="cylinder" size="0.005 0.014" pos="0 0 -0.051"
+            material="clamp_screw_mat"/>
+      <geom name="clamp_screw_handle" class="clamp_visual" type="capsule" size="0.004 0.020"
+            fromto="-0.020 0 -0.070 0.020 0 -0.070" material="clamp_screw_mat"/>
+    </body>
+
+  </worldbody>
+</mujoco>

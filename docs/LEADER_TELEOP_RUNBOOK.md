@@ -247,6 +247,9 @@ changes nothing except how much the picture resembles the room.
 ## Related
 
 - `README.md` → "Working with real hardware" — M6/M7 keyboard control
+- `docs/TELEOP_SESSION_LOG_AND_PLAN.md` — the debugging log behind this
+  runbook: what broke, what was tried, what was reverted and why. Read it
+  before re-attempting the sim table height or self-collision
 - `docs/PROJECT_STATUS.md` — phase status
 - `docs/REAL_SIM_MAPPING_DEEP_DIVE.md` — the mapping math
 - `docs/ROADMAP_TELEOP_TO_DATASET.md` — what comes after teleop

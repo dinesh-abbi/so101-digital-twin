@@ -97,7 +97,10 @@ import mujoco.viewer                             # noqa: E402
 from real_sim_joint_mapping import (             # noqa: E402
     JOINT_NAMES,
     load_sim_joint_ranges_rad,
+    real_to_sim,
     real_to_sim_vector,
+    sim_joint_ranges_from_model,
+    widen_shoulder_lift,
 )
 
 # Corner-placed scene (base sits at the near long edge's midpoint, facing
@@ -112,6 +115,12 @@ from real_sim_joint_mapping import (             # noqa: E402
 # where the base sits in world space, so it does not touch control.
 SCENE_PATH = (_HERE / "digital_twin_env" / "robot_corner_test"
               / "robot_corner_scene.xml")
+
+# Robot only, no table -- see robot_bare_scene.xml's comment. Nothing to
+# penetrate, nothing to exclude, no corner placement; joint tracking is
+# all that is shown.
+BARE_SCENE_PATH = (_HERE / "digital_twin_env" / "robot_bare_test"
+                   / "robot_bare_scene.xml")
 
 # Copied from robot_corner_test/run_robot_corner.py -- see that file for
 # the full derivation (measured base mesh extent, table's true edge
@@ -139,6 +148,13 @@ DEFAULT_MAX_RELATIVE_TARGET = 4.0
 # m7_mirror_sim.py, and GRIPPER_SAFE_MAX in so101_joint_characterization.py.
 GRIPPER_MAX = 65.0
 
+# How many consecutive ticks a self-collision state must hold before it is
+# reported. At a marginal fold MuJoCo gains and loses contact on
+# consecutive frames; undebounced that produced ~50 [fold] messages in one
+# 62 s session, which buried the real warnings. 10 ticks is ~1/3 s at the
+# default 30 fps.
+FOLD_DEBOUNCE_TICKS = 10
+
 # NO minimum. M6/M7 use GRIPPER_MIN=20 because a KEYBOARD drives the gripper
 # there and a stray keypress could crush something. Under leader-arm teleop
 # the operator's own hand is the limit -- you feel the jaw close -- and a
@@ -146,6 +162,46 @@ GRIPPER_MAX = 65.0
 # cannot fully close and sits slightly open from the moment teleop starts.
 # Measured on twin_leader_2 -> twin_follower_3, 2026-09-03. The MAX stays
 # because the follower stalls against its own stop regardless of hand feel.
+
+# One capsule per consecutive body pair, spanning from the parent body's
+# own origin to its local offset toward the child (i.e. following the same
+# vector so101.xml already uses to place that child body -- see each
+# body's `pos=` in so101.xml). Radius is a cosmetic guess sized to look
+# like a servo cable bundle in the reference photos, not a measurement.
+# contype/conaffinity=0 -- these must never participate in collision or
+# they would need their own exclude() entries and could reintroduce a jam.
+WIRE_RADIUS = 0.004
+WIRE_RGBA = (0.05, 0.05, 0.05, 1.0)
+WIRE_SEGMENTS = (
+    ("shoulder", "upper_arm"),
+    ("upper_arm", "lower_arm"),
+    ("lower_arm", "wrist"),
+    ("wrist", "gripper"),
+)
+
+
+def _add_wire_geoms(spec):
+    """Add cosmetic capsule geoms tracing the arm's body chain (--wires).
+
+    Purely visual: no mass, no collision. Each capsule lives INSIDE the
+    parent body's frame, from that body's origin to its child's attachment
+    point (the same local vector so101.xml already places the child at),
+    so it rigidly follows the parent body through mj_step like any other
+    geom already on that body -- no extra bookkeeping needed per tick.
+    """
+    for parent_name, child_name in WIRE_SEGMENTS:
+        parent = spec.body(parent_name)
+        child = spec.body(child_name)
+        parent.add_geom(
+            name=f"wire_{parent_name}_{child_name}",
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+            size=[WIRE_RADIUS, 0, 0],
+            fromto=[0, 0, 0, *child.pos],
+            rgba=WIRE_RGBA,
+            contype=0,
+            conaffinity=0,
+            group=2,
+        )
 
 
 def parse_args():
@@ -171,8 +227,27 @@ def parse_args():
                          "sync -- it separates a mapping problem (ctrl "
                          "frozen) from a stuck sim (qpos frozen) from a "
                          "rendering problem (both move, window static).")
+    ap.add_argument("--bare", action="store_true",
+                    help="Robot only, no table. Sidesteps the unresolved "
+                         "table-height mismatch entirely -- nothing to "
+                         "collide with, no exclusions needed. Implies "
+                         "--no-corner (there is no table to sit in).")
     ap.add_argument("--no-sim", action="store_true",
                     help="Skip the MuJoCo window; control only.")
+    ap.add_argument("--wires", action="store_true",
+                    help="Add purely cosmetic capsule geoms along the arm "
+                         "(shoulder->upper_arm->lower_arm->wrist->gripper) "
+                         "to visually suggest the real arm's servo cables. "
+                         "No collision, no mass -- does not affect physics "
+                         "or tracking. Off by default.")
+    ap.add_argument("--record", default=None,
+                    help="Write a per-tick CSV to this path: wall-clock "
+                         "time, leader command, follower measured (both "
+                         "normalised units and sim degrees via the same "
+                         "real_to_sim conversion the mirror uses), sim ctrl, "
+                         "and sim qpos -- for all 6 joints. ctrl-vs-real "
+                         "isolates the MAPPING; qpos-vs-real includes the "
+                         "PHYSICS fit (kp/kv). Requires --sim (the default).")
     return ap.parse_args()
 
 
@@ -210,9 +285,63 @@ def main():
     model = data = sim_ranges = None
     sim_steps_per_frame = 1
     if not args.no_sim:
-        sim_ranges = load_sim_joint_ranges_rad(str(SCENE_PATH))
-        model = mujoco.MjModel.from_xml_path(str(SCENE_PATH))
+        # Loaded via MjSpec (not MjModel.from_xml_path) so shoulder_lift's
+        # range can be widened before compiling.
+        scene_path = BARE_SCENE_PATH if args.bare else SCENE_PATH
+        spec = mujoco.MjSpec.from_file(str(scene_path))
+        # Table EXCLUDED again. Solid was tried (you asked for a hard
+        # surface) and reverted: the arm stopped ON the table but in a
+        # contorted pose, up to 38.9 deg from where the real arm was --
+        # worse than the phasing it replaced. Neither option is right;
+        # the unresolved ~4 cm real/sim height gap has to be measured
+        # first (tabletop -> bottom of base plate; the follower sits on
+        # a clamp mount the scene does not model).
+        if not args.bare:
+            for _arm_body in ("shoulder", "upper_arm", "lower_arm", "wrist",
+                              "gripper", "moving_jaw_so101_v1",
+                              "camera_mount"):
+                spec.add_exclude(bodyname1="table", bodyname2=_arm_body)
+
+
+        # Self-collision was tried excluded on 2026-09-09 (same pattern as
+        # the table exclusion above) after teleop_log_v2.csv showed folding
+        # the arm back near rest mid-session -- shoulder<->lower_arm,
+        # shoulder<->wrist, shoulder<->gripper, shoulder<->camera_mount,
+        # upper_arm<->wrist -- jamming tracking exactly like the table bug
+        # (elbow_flex 31 deg error, wrist_flex 58 deg). Deliberately turned
+        # back OFF (i.e. self-collision physics stays ON, the exclusion
+        # removed) per explicit instruction the same day: the visible
+        # mesh interpenetration at tight folds (arm visually passing
+        # through itself) was judged worse than the tracking cost. Cost,
+        # confirmed live: with self-collision on, the sim CANNOT follow the
+        # real arm into its tightest folds -- it settles 30-70 deg short
+        # (shoulder_lift commanded -99 deg settled at -31 deg in one
+        # measured case) instead of jamming outright, so the arm visibly
+        # lags the leader at extreme poses rather than freezing. That is
+        # the accepted tradeoff now: correct-looking geometry everywhere,
+        # at the cost of tracking accuracy in the small pose region where
+        # the model's collision primitives are coarser than the real arm's
+        # actual clearance. Do not re-add this exclusion without checking
+        # back -- it was tried, worked for accuracy, and was explicitly
+        # rejected for how it looked.
+
+        # This arm folds ~10 deg past so101.xml's shoulder_lift limit and
+        # rests the upper arm on the base; without this the sim cannot
+        # reach the real rest pose at all. Scene-local, never touches the
+        # shared XML -- see widen_shoulder_lift's docstring.
+        widen_shoulder_lift(spec)
+
+        if args.wires:
+            _add_wire_geoms(spec)
+
+        model = spec.compile()
         data = mujoco.MjData(model)
+
+        # Read ranges from OUR compiled model, not the XML on disk -- the
+        # XML still says +/-100 for shoulder_lift, so re-reading it would
+        # make the mapping target a limit the model no longer has and the
+        # widening above would do nothing.
+        sim_ranges = sim_joint_ranges_from_model(model)
 
         # Corner placement, applied post-load -- see CORNER_BASE_OFFSET
         # above. Must happen before the first mj_forward()/qpos seed below,
@@ -222,7 +351,7 @@ def main():
         # checking whether a sim/real pose mismatch is just this cosmetic
         # reposition (it maps joint angles in the arm's own frame either
         # way) or something in the mapping itself.
-        if not args.no_corner:
+        if not args.no_corner and not args.bare:
             base_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "base")
             if base_id == -1:
                 raise RuntimeError("body 'base' not found -- is SCENE_PATH "
@@ -245,6 +374,7 @@ def main():
     print("  Connected.")
 
     viewer = None
+    record_file = record_writer = None
     try:
         if not args.no_sim:
             obs = follower.get_observation()
@@ -254,37 +384,50 @@ def main():
             data.ctrl[:6] = qpos
             mujoco.mj_forward(model, data)
 
-            # The real follower's rest pose is usually folded down, and the
-            # sim's base sits ON the tabletop -- so that same pose seeds the
-            # gripper INSIDE the table (measured: 38 contacts, up to 18 mm
-            # penetration). MuJoCo then spends the whole session pushing the
-            # jaw out of the table instead of tracking, and because teleop
-            # moves the target gradually the joint never gets a large enough
-            # command to break free: elbow_flex sat at +63 deg while ctrl
-            # asked for -95, looking exactly like "the sim is frozen".
-            # Warn rather than silently mistrack -- the fix is a starting
-            # pose whose gripper is clear of the table, which only the
-            # operator can set on the real arm.
+            # Nothing is excluded now: the table is solid and self-collision
+            # is on. Contacts here are expected at a tight starting fold
+            # (the real arm rests on itself too) and are not a start-
+            # refusal, but they DO mean the sim may not fully reach that
+            # fold once teleop starts -- it settles short rather than
+            # jamming solid. Watch --debug-track if the arm seems to stop
+            # responding at an extreme pose.
             if data.ncon > 0:
                 deepest = min(float(data.contact[i].dist)
                               for i in range(data.ncon))
                 if deepest < -0.002:
-                    print(f"\n  WARNING: the sim starts in collision "
-                          f"({data.ncon} contacts, {abs(deepest) * 1000:.0f} mm "
-                          f"deep).")
-                    print("  The follower's current pose puts the gripper "
-                          "inside the tabletop, so")
-                    print("  the sim will fight the table instead of "
-                          "tracking. Lift the real arm")
-                    print("  clear of the table surface and restart.")
+                    print(f"\n  Note: {data.ncon} contacts at the starting "
+                          f"pose ({abs(deepest) * 1000:.0f} mm deep) not "
+                          f"-- expected at a folded rest pose. Watch "
+                          f"--debug-track if tracking looks stuck.")
 
             viewer = mujoco.viewer.launch_passive(model, data)
+
+        if args.record:
+            if args.no_sim:
+                raise SystemExit("--record needs the sim (drop --no-sim) "
+                                  "-- it logs ctrl/qpos alongside real.")
+            import csv
+            record_file = open(args.record, "w", newline="")
+            record_writer = csv.writer(record_file)
+            header = ["wall_time"]
+            for j in JOINT_NAMES:
+                header += [f"{j}_leader_cmd", f"{j}_real_norm",
+                           f"{j}_real_sim_deg", f"{j}_sim_ctrl_deg",
+                           f"{j}_sim_qpos_deg"]
+            record_writer.writerow(header)
+            print(f"  --record: logging to {args.record}")
 
         print("\n  Move the LEADER arm. Ctrl+C (or close the viewer) to quit.")
         print("  Keep a hand near the follower's power connector.\n")
 
         period = 1.0 / args.fps
         tick_count = 0
+        # Self-collision state, with hysteresis. Contact flickers on and
+        # off frame-by-frame at a marginal fold; undebounced that produced
+        # ~50 messages in one 62 s session, burying real warnings.
+        was_colliding = False
+        pending = None
+        pending_count = 0
         while True:
             loop_start = time.perf_counter()
 
@@ -325,6 +468,59 @@ def main():
                     mujoco.mj_step(model, data)
                 viewer.sync()
 
+                # Live fold-safety monitor. Self-collision is ON (see the
+                # spec.compile() comment above), so a tight enough fold
+                # makes the sim settle short of the real arm rather than
+                # matching it exactly -- this prints ONLY on the state
+                # transition (colliding <-> clear), not every tick, so it
+                # stays readable while still telling you in real time when
+                # the current fold has entered the lossy region.
+                # run_robot_on_table.py's --pose folded
+                # (shoulder_lift=-100, elbow_flex=92, wrist_flex=60) is a
+                # verified collision-free reference for how far you can
+                # fold before this fires.
+                is_colliding = data.ncon > 0
+                if is_colliding != was_colliding:
+                    if is_colliding == pending:
+                        pending_count += 1
+                    else:
+                        pending, pending_count = is_colliding, 1
+                    if pending_count >= FOLD_DEBOUNCE_TICKS:
+                        was_colliding = is_colliding
+                        pending, pending_count = None, 0
+                        if is_colliding:
+                            print(f"\n  [fold] self-contact at tick "
+                                  f"{tick_count} -- sim may lag the real "
+                                  f"arm here (self-collision is on).",
+                                  flush=True)
+                        else:
+                            print(f"  [fold] clear at tick {tick_count}",
+                                  flush=True)
+                else:
+                    pending, pending_count = None, 0
+
+                if record_writer is not None:
+                    # wall-clock, not tick index -- lag analysis needs real
+                    # time, and this loop's period is only nominal
+                    # (precise_sleep clamps to >=0, so a slow tick is never
+                    # made up).
+                    row = [f"{time.time():.6f}"]
+                    for j in JOINT_NAMES:
+                        leader_cmd = float(raw_action.get(f"{j}.pos", float("nan")))
+                        real_norm = measured[j]
+                        real_sim_deg = math.degrees(
+                            real_to_sim(j, real_norm, sim_ranges[j]))
+                        jid = mujoco.mj_name2id(
+                            model, mujoco.mjtObj.mjOBJ_JOINT, j)
+                        qadr = model.jnt_qposadr[jid]
+                        aid = mujoco.mj_name2id(
+                            model, mujoco.mjtObj.mjOBJ_ACTUATOR, j)
+                        row += [f"{leader_cmd:.3f}", f"{real_norm:.3f}",
+                                f"{real_sim_deg:.3f}",
+                                f"{math.degrees(data.ctrl[aid]):.3f}",
+                                f"{math.degrees(data.qpos[qadr]):.3f}"]
+                    record_writer.writerow(row)
+
             # --debug-track prints real / ctrl / qpos side by side. Without
             # it the loop is a black box: "the sim is frozen" looks
             # identical whether the mirror never wrote a target, the
@@ -357,6 +553,9 @@ def main():
     finally:
         if viewer is not None:
             viewer.close()
+        if record_file is not None:
+            record_file.close()
+            print(f"  record log written: {args.record}")
         leader.disconnect()
         follower.disconnect()
         print("  Disconnected. THE FOLLOWER IS LIMP - SUPPORT IT.")

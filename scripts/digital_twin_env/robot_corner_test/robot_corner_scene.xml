@@ -1,0 +1,68 @@
+<mujoco model="so101_linnmon_table_corner_scene">
+  <!-- Sim-only visualization variant: the arm sits in a table CORNER
+       instead of the centre. This XML is otherwise IDENTICAL to
+       ../robot_keyboard_test/keyboard_robot_scene.xml -- the corner offset
+       is NOT set here.
+
+       Why not: so101.xml is a complete, self-contained MJCF document
+       (its own <option>/<compiler>/<default>/<asset>/<worldbody>/
+       <actuator>), included via MuJoCo's <include>, which is a literal
+       text splice, not a scoped import. It cannot be wrapped in a <body>
+       -- attempted and confirmed to fail compilation (schema violation,
+       "unrecognized element 'option'" once nested). And so101.xml itself
+       hardcodes body "base" at pos="0 0 0" with no positionable parent of
+       its own, and per project convention is never edited directly since
+       every scene includes it.
+
+       Mechanism actually used: base's parent is the WORLD body (id 0,
+       confirmed via model.body_parentid), so `model.body_pos[base_id] =
+       [x, y, 0]` followed by mj_forward() rigidly translates the entire
+       kinematic chain -- confirmed by checking the gripper body's world
+       position shifted by the same offset. See run_robot_corner.py, which
+       does this at load time; this XML is unchanged from the centred
+       scene on purpose, so the offset lives in one small script rather
+       than forking scene geometry. -->
+
+  <compiler angle="radian" autolimits="true" meshdir="../../../so101_assets/assets"/>
+
+  <include file="../../../so101_assets/so101.xml"/>
+
+  <visual>
+    <headlight diffuse="0.3 0.3 0.3" ambient="0.4 0.4 0.4" specular="0.1 0.1 0.1"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <material name="table_white_mat" rgba="0.92 0.92 0.90 1" specular="0.15" shininess="0.2" reflectance="0.05"/>
+    <material name="floor_mat" rgba="0.55 0.55 0.55 1" specular="0.05" shininess="0.0"/>
+  </asset>
+
+  <default>
+    <default class="table_collision">
+      <geom contype="1" conaffinity="1" condim="3" friction="0.6 0.01 0.001" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="top_light" pos="0 0 1.8" dir="0 0 -1" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1" castshadow="true"/>
+
+    <camera name="table_view" pos="0.9 -0.9 0.6" xyaxes="0.707 0.707 0 -0.4 0.4 0.82"/>
+
+    <geom name="floor" type="plane" size="2.5 2.5 0.05" pos="0 0 -0.74" material="floor_mat" class="table_collision"/>
+
+    <body name="table" pos="0 0 -0.74">
+      <geom name="tabletop" type="box" size="0.50 0.30 0.015" pos="0 0 0.725"
+            material="table_white_mat" class="table_collision"/>
+
+      <geom name="table_leg_front_left" type="cylinder" size="0.025 0.355" pos="0.42 0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_front_right" type="cylinder" size="0.025 0.355" pos="0.42 -0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_back_left" type="cylinder" size="0.025 0.355" pos="-0.42 0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+      <geom name="table_leg_back_right" type="cylinder" size="0.025 0.355" pos="-0.42 -0.22 0.355"
+            material="table_white_mat" class="table_collision"/>
+    </body>
+
+  </worldbody>
+</mujoco>

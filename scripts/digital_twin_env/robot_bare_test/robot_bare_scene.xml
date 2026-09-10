@@ -1,0 +1,44 @@
+<mujoco model="so101_bare_scene">
+  <!-- Robot on the standard MuJoCo groundplane -- no table.
+
+       WHY THIS EXISTS: the table scenes have an unresolved ~5-7 cm
+       mismatch between where the sim's tabletop sits and where the real
+       arm's workspace actually is, so poses the real arm reaches cleanly
+       put the sim gripper below the modeled surface. Excluding table
+       contact hides it; making the table solid contorts the arm (up to
+       126 deg of joint error, measured across a 40x contact-stiffness
+       sweep -- the position actuators simply overpower any contact).
+
+       Here the robot's base sits ON the groundplane, so there is no
+       table-height question at all and nothing needs excluding. Use
+       robot_corner_scene.xml when the table itself matters (object
+       parity, dataset framing). -->
+
+  <compiler angle="radian" autolimits="true" meshdir="../../../so101_assets/assets"/>
+
+  <include file="../../../so101_assets/so101.xml"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="140" elevation="-20"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <!-- MuJoCo's stock gradient sky + checker groundplane, same as the
+         Menagerie scene files ship with. -->
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7"
+             rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8"
+             width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true"
+              texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+  </worldbody>
+</mujoco>

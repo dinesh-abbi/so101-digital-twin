@@ -57,19 +57,39 @@ JOINT_NAMES = [
 GRIPPER_JOINT = "gripper"
 
 
-def load_sim_joint_ranges_rad(scene_xml_path: str) -> dict:
-    """Read each joint's [lo, hi] range in radians directly from a compiled
-    MuJoCo model -- never hardcode these, so a future so101.xml change (or
-    a recalibrated model) is picked up automatically."""
-    model = mujoco.MjModel.from_xml_path(scene_xml_path)
+def sim_joint_ranges_from_model(model) -> dict:
+    """Read each joint's [lo, hi] range in radians from an ALREADY-COMPILED
+    MjModel.
+
+    Prefer this over load_sim_joint_ranges_rad() whenever the caller has
+    modified the spec before compiling -- e.g. widen_shoulder_lift().
+    Re-reading the XML would silently return the ORIGINAL +/-100 range and
+    the mapping would keep targeting a limit the model no longer has, so
+    the widening would have no visible effect at all (this exact bug,
+    2026-09-09: the joint was widened, the mapping was not, and the sim arm
+    still stopped dead at -100).
+    """
     ranges = {}
     for name in JOINT_NAMES:
         jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
         if jid == -1:
-            raise ValueError(f"Joint '{name}' not found in {scene_xml_path}")
+            raise ValueError(f"Joint '{name}' not found in the compiled model")
         lo, hi = model.jnt_range[jid]
         ranges[name] = (float(lo), float(hi))
     return ranges
+
+
+def load_sim_joint_ranges_rad(scene_xml_path: str) -> dict:
+    """Read each joint's [lo, hi] range in radians directly from a compiled
+    MuJoCo model -- never hardcode these, so a future so101.xml change (or
+    a recalibrated model) is picked up automatically.
+
+    NOTE: this compiles the XML as-written. If you modify the spec before
+    compiling (widen_shoulder_lift, add_exclude, ...), use
+    sim_joint_ranges_from_model(model) on YOUR compiled model instead.
+    """
+    model = mujoco.MjModel.from_xml_path(scene_xml_path)
+    return sim_joint_ranges_from_model(model)
 
 
 def real_to_sim(joint_name: str, real_normalized: float, sim_range_rad: tuple) -> float:
@@ -118,3 +138,79 @@ def sim_to_real_vector(sim_rad_by_joint: dict, sim_ranges_rad: dict) -> dict:
     return {
         name: sim_to_real(name, sim_rad_by_joint[name], sim_ranges_rad[name]) for name in JOINT_NAMES
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-arm joint-range widening (2026-09-09)
+# ---------------------------------------------------------------------------
+# so101.xml gives shoulder_lift a +/-100 deg range. Both SO-101 arms on this
+# bench travel FURTHER than that: twin_follower_3 calibrates to a 219.4 deg
+# span (+/-109.7) and twin_leader_2 to 209.2 deg. The real follower's rest
+# pose lays the upper arm down ONTO the base/shoulder-pan housing -- a pose
+# the model cannot represent, because -100 deg is its hard stop. Commanding
+# the recorded rest pose therefore leaves the sim arm visibly higher than
+# the real one, and the resulting end-effector error reads as the gripper
+# hovering above (or dipping below) where the real gripper actually is.
+#
+# CLAUDE.md forbids editing so101.xml's ranges to match one arm's
+# calibration, and rightly so: the model is shared, and two physically
+# identical arms measured 23 deg apart on shoulder_pan. So this widening is
+# applied to a COMPILED SCENE at runtime via MjSpec, never to the shared
+# XML -- exactly where the project already puts per-arm differences.
+#
+# BOTH limits must be raised. The joint's `range` is only half the story:
+# the position actuator has its own `ctrlrange`, also +/-100, which clamps
+# the command before the joint limit is ever consulted. Widening the joint
+# alone measurably does nothing (verified: still settles at exactly -100.0).
+SHOULDER_LIFT_WIDENED_DEG = 110.0
+
+
+def widen_shoulder_lift(spec, half_range_deg: float = SHOULDER_LIFT_WIDENED_DEG) -> None:
+    """Widen shoulder_lift's joint range AND actuator ctrlrange in-place.
+
+    Call on an MjSpec BEFORE spec.compile(). Leaves so101.xml untouched --
+    see the module comment above for why this lives here and not in the XML.
+
+    Measured effect at the folded rest pose: the upper arm's lowest geom
+    drops from z=0.1054 (at -100 deg) to z=0.0887 (at -110), with no
+    self-collision introduced at any tested angle down to -115.
+    """
+    import math as _math
+
+    lim = _math.radians(half_range_deg)
+    spec.joint("shoulder_lift").range = [-lim, lim]
+    spec.actuator("shoulder_lift").ctrlrange = [-lim, lim]
+
+
+# ---------------------------------------------------------------------------
+# Real/sim table height mismatch (2026-09-09) -- MEASURED, NOT FIXED
+# ---------------------------------------------------------------------------
+# With the follower at the all-joints-zero reference pose (goto_zero_pose.py),
+# the real gripper's lowest point sits 28 cm above the real tabletop. The sim
+# at the identical pose puts it at 21.0 cm. The sim's arm therefore sits 7 cm
+# too low relative to its table.
+#
+# Consequence: poses the real arm reaches cleanly put the sim gripper up to
+# 4.4 cm BELOW the modeled tabletop (210 of ~350 sampled frames from
+# teleop_log_v8.csv). That is why arm-vs-table contact is excluded in the
+# teleop/replay scripts -- with a solid table those poses get blocked and
+# tracking degrades by up to 38.9 deg. The visible cost is the gripper
+# phasing through the tabletop at low poses.
+#
+# TWO FIXES HAVE BEEN TRIED AND BOTH REVERTED:
+#   1. Raising the BASE by ~7.5 cm -- made the whole robot visibly float
+#      above the table.
+#   2. Lowering the TABLE by 7 cm (apply_table_height_correction, removed)
+#      -- fixes the gripper-to-table distance and eliminates all
+#      penetration, but leaves the base hanging 7 cm above the surface it
+#      is bolted to. Looks worse than the problem it solves.
+#
+# Both failed for the same reason: the 7 cm is a discrepancy in the ARM's
+# own kinematics relative to its mount, so translating either body rigidly
+# just moves the error somewhere more visible. A real fix needs the mount
+# geometry (or the model's link lengths) checked against the physical arm,
+# which has not been done.
+#
+# Re-measure if the arm is re-mounted, the table changes, or a different
+# arm is used.
+TABLE_HEIGHT_MISMATCH_M = 0.07  # sim arm sits this far BELOW where it should
