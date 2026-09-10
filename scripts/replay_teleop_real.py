@@ -103,10 +103,22 @@ GRIPPER_MAX = 65.0
 WRIST_ROLL_TRAVEL_CAP = 120.0
 
 # How far a joint's MEASURED position may sit from what it was commanded
-# before the replay aborts. The clamp keeps each step under 4.0 units, and a
-# healthy follower tracks within a few units of that, so a joint 25 units
-# adrift is not lagging -- it is not listening.
-DIVERGENCE_LIMIT = 25.0
+# before the replay aborts.
+#
+# Raised 25 -> 45 on 2026-09-10 after a --source sim replay aborted on
+# elbow_flex at t=6.3 s: commanded +26.6, measured +51.8. That was the guard
+# being wrong, not the arm. The joint was BEHIND its target, not running
+# past it, and the trajectory itself is gentle -- the sim commands
+# elbow_flex at most 0.84 units/tick against a 4.0 clamp. It was simply
+# lagging while lowering from +65 to +17 against gravity over two seconds.
+#
+# 25 was calibrated for --source real, where the arm replays its own past
+# positions and therefore tracks closely. A sim-sourced replay asks for a
+# trajectory the hardware never actually performed, so a heavily loaded
+# joint falls further behind legitimately. 45 still catches a runaway (the
+# wrist_roll incident hit 100+ within a second) while leaving room for a
+# joint that is following, just slowly.
+DIVERGENCE_LIMIT = 45.0
 
 # How far each joint may sit from the CSV's first pose before this refuses
 # to start. 5 units is roughly the distance the clamp covers in ~1.5 ticks,
@@ -251,6 +263,19 @@ def main():
                          "--skip-joints wrist_roll. They are still read and "
                          "compared, just never driven -- for a joint with a "
                          "known fault.")
+    ap.add_argument("--approach", action="store_true",
+                    help="Instead of refusing when the arm is not at the "
+                         "recording's first pose, WALK IT THERE first -- "
+                         "slowly, one small step per tick, under the same "
+                         "clamp, before the replay starts. Removes the "
+                         "hand-positioning step when replaying from the "
+                         "middle of a recording. The motion is a gentle "
+                         "ramp, not the lunge the start-pose gate exists "
+                         "to prevent; Ctrl+C stops it like anything else.")
+    ap.add_argument("--approach-speed", type=float, default=1.5,
+                    metavar="UNITS_PER_TICK",
+                    help="How fast --approach closes the gap (default 1.5, "
+                         "well under the 4.0 clamp). Lower is gentler.")
     args = ap.parse_args()
 
     if args.source == "sim" and args.window is None:
@@ -428,15 +453,58 @@ def main():
                       f"{first[j]:+7.2f}   diff {d:5.2f}{mark}")
                 if d > START_TOLERANCE:
                     bad.append(j)
-            if bad:
+            if bad and not args.approach:
                 raise SystemExit(
                     f"\n  REFUSING TO START: {', '.join(bad)} more than "
                     f"{START_TOLERANCE} units from the recording's first "
                     f"pose.\n"
                     "  Replay would open with a lunge instead of a step.\n"
-                    "  Move the arm near the start pose first (m6_keyboard_"
-                    "real.py\n  --recover, or by hand with torque off), "
-                    "then re-run.")
+                    "  Either add --approach to walk the arm there gently "
+                    "first,\n  or move it by hand with torque off, then "
+                    "re-run.")
+            if bad:
+                # --approach: close the gap as a ramp rather than a jump.
+                # This is the same motion the start-pose gate exists to
+                # prevent, made safe by rate-limiting it: each tick moves at
+                # most --approach-speed units per joint, well under the
+                # clamp, so the arm eases into position instead of lunging.
+                print(f"\n  --approach: walking {', '.join(bad)} to the "
+                      "start pose")
+                print("  REAL ARM WILL MOVE NOW. Ctrl+C to stop.")
+                input("  Press ENTER to begin the approach...")
+                goal = {j: (here[j] if j in skip else first[j])
+                        for j in JOINT_NAMES}
+                for _step in range(2000):
+                    obs = follower.get_observation()
+                    cur = {j: float(obs[f"{j}.pos"]) for j in JOINT_NAMES}
+                    remaining = {j: goal[j] - cur[j] for j in JOINT_NAMES
+                                 if j not in skip}
+                    worst = max(abs(v) for v in remaining.values())
+                    if worst <= START_TOLERANCE:
+                        break
+                    cmd = {}
+                    for j in JOINT_NAMES:
+                        if j in skip:
+                            cmd[f"{j}.pos"] = cur[j]
+                            continue
+                        d = remaining[j]
+                        cmd[f"{j}.pos"] = cur[j] + max(
+                            -args.approach_speed,
+                            min(args.approach_speed, d))
+                    cmd["gripper.pos"] = min(GRIPPER_MAX, cmd["gripper.pos"])
+                    follower.send_action(cmd)
+                    if _step % 20 == 0:
+                        print(f"\r    worst gap {worst:6.2f} units", end="",
+                              flush=True)
+                    time.sleep(1.0 / args.fps)
+                else:
+                    raise SystemExit(
+                        "\n\n  --approach did not converge in 2000 steps. "
+                        "The arm is not\n  reaching the start pose -- check "
+                        "for an obstruction before retrying.")
+                obs = follower.get_observation()
+                here = {j: float(obs[f"{j}.pos"]) for j in JOINT_NAMES}
+                print(f"\r    worst gap {max(abs(here[j] - first[j]) for j in JOINT_NAMES if j not in skip):6.2f} units -- in position.   ")
             print("  Start pose OK.")
 
         if not args.no_sim:
@@ -463,6 +531,7 @@ def main():
         roll_traveled = 0.0
         roll_prev = (here["wrist_roll"] if not args.dry_run else None)
         abort_reason = None
+        prev_measured = {}
 
         for t, pose in frames:
             if viewer is not None and not viewer.is_running():
@@ -514,14 +583,29 @@ def main():
                         continue
                     gap = abs(measured[j] - action[f"{j}.pos"])
                     if gap > DIVERGENCE_LIMIT:
+                        # Is it closing the gap or opening it? Lagging and
+                        # running away look identical in a single sample but
+                        # need opposite fixes, so compare against the last
+                        # measurement.
+                        was = prev_measured.get(j)
+                        closing = (was is not None
+                                   and abs(measured[j] - action[f"{j}.pos"])
+                                   < abs(was - action[f"{j}.pos"]))
+                        kind = ("LAGGING -- it IS following, just too slowly "
+                                "(the gap is closing).\n  Raise "
+                                "--max-relative-target, lower --fps, or "
+                                "accept a larger\n  DIVERGENCE_LIMIT."
+                                if closing else
+                                "NOT FOLLOWING -- the gap is not closing. "
+                                "Check the joint before retrying.")
                         abort_reason = (
                             f"{j} is {gap:.1f} units from its command at "
                             f"t={t:.1f}s\n  (commanded {action[f'{j}.pos']:+.1f}, "
                             f"measured {measured[j]:+.1f}, limit "
                             f"{DIVERGENCE_LIMIT:.0f}).\n"
-                            "  The joint is not following. Stopping before it "
-                            "is driven further.")
+                            f"  {kind}")
                         break
+                prev_measured = dict(measured)
                 if abort_reason:
                     break
             else:
