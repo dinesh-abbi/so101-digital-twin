@@ -40,4 +40,4 @@ if ($Speed -le 0) { $Speed = 0.4 }
 & $py "$root\scripts\replay_teleop_real.py" $csv `
     --source sim --window $Start $End --speed $Speed `
     --follower-port COM14 --follower-id twin_follower_3 `
-    --bare --wires --fps 60 --skip-joints wrist_roll --approach
+    --bare --wires --fps 60 --skip-joints wrist_roll

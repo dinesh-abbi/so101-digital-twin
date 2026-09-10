@@ -13,12 +13,14 @@ This drives real servos from a FILE. There is no human on a leader arm to
 stop a bad motion by letting go, so the guards here matter more than in the
 live script:
 
-  - START POSE GATE. The arm must already be near the CSV's first pose
-    (within START_TOLERANCE units, every joint) or this refuses to run.
-    Without it the first command is a jump from wherever the arm happens to
-    sit to wherever the recording began -- exactly the runaway shape that
-    pulled a wire loose on 2026-09-08 (see m6_keyboard_real.py --recover's
-    travel cap).
+  - START POSE. The first command must not be a jump from wherever the arm
+    happens to sit to wherever the recording began -- that is the runaway
+    shape that pulled a wire loose on 2026-09-08 (see m6_keyboard_real.py
+    --recover's travel cap). By default the arm is WALKED to the start
+    pose first, one small step per tick under the same clamp, with its own
+    confirmation prompt. The danger was never moving to the start pose; it
+    was jumping there in a single command. --no-approach restores the old
+    behaviour of refusing outright.
   - PRE-FLIGHT TRAJECTORY CHECK. Every per-tick step in the file is checked
     against the clamp BEFORE connecting. A recording with a jump bigger
     than the clamp would be silently clamped mid-motion, so the arm would
@@ -263,15 +265,20 @@ def main():
                          "--skip-joints wrist_roll. They are still read and "
                          "compared, just never driven -- for a joint with a "
                          "known fault.")
-    ap.add_argument("--approach", action="store_true",
-                    help="Instead of refusing when the arm is not at the "
-                         "recording's first pose, WALK IT THERE first -- "
-                         "slowly, one small step per tick, under the same "
-                         "clamp, before the replay starts. Removes the "
-                         "hand-positioning step when replaying from the "
-                         "middle of a recording. The motion is a gentle "
-                         "ramp, not the lunge the start-pose gate exists "
-                         "to prevent; Ctrl+C stops it like anything else.")
+    ap.add_argument("--no-approach", action="store_true",
+                    help="Refuse to start when the arm is not already at "
+                         "the recording's first pose, instead of walking it "
+                         "there.\n"
+                         "BY DEFAULT the arm is walked to the start pose "
+                         "gently -- one small step per tick, under the same "
+                         "clamp, with its own confirmation prompt. That is "
+                         "the safe version of the motion the start-pose "
+                         "gate exists to prevent: the danger was never "
+                         "moving to the start pose, it was JUMPING there in "
+                         "one command. Replaying a --window almost always "
+                         "means the arm has to be repositioned first, so "
+                         "refusing just moved the same motion to someone's "
+                         "hands.")
     ap.add_argument("--approach-speed", type=float, default=1.5,
                     metavar="UNITS_PER_TICK",
                     help="How fast --approach closes the gap (default 1.5, "
@@ -469,7 +476,7 @@ def main():
                       f"{first[j]:+7.2f}   diff {d:5.2f}{mark}")
                 if d > START_TOLERANCE:
                     bad.append(j)
-            if bad and not args.approach:
+            if bad and args.no_approach:
                 raise SystemExit(
                     f"\n  REFUSING TO START: {', '.join(bad)} more than "
                     f"{START_TOLERANCE} units from the recording's first "
