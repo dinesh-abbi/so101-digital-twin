@@ -21,6 +21,32 @@ replay runs cleanly, and both are properties of the recording:
     That is not the clamp, it is the servo lowering the forearm against
     gravity, so the fix is to stretch playback rather than loosen a guard.
 
+    THE SPEED HEURISTIC IS NOT RELIABLE, and two better-looking ideas have
+    already been tested and rejected. If a replay aborts on a LAGGING
+    joint, lower --speed by hand; do not assume the picker can be made to
+    predict it.
+
+      Rejected 1 -- raw per-tick peak. Reads the fastest joint rather than
+      the most burdened one. Fixed by LOAD_WEIGHT below, which is why that
+      exists.
+
+      Rejected 2 -- worst sustained rate over a 2 s window. Does not
+      separate the cases at all. Measured, weighted, at the speed each was
+      actually run:
+
+          simple    31.8  worked
+          simple_1  41.4  worked
+          demo      25.0  FAILED on elbow_flex
+
+      The failure has a LOWER sustained rate than two successes. Adding
+      this made every recording collapse to 0.1x, so it was reverted.
+
+    What does look different about demo: its largest elbow drop (55 units
+    in 2 s) starts at replay t=0.1 s, while simple's (46 units) starts at
+    t=2.6 s and simple_1's (71 units) ramps in gradually. A hard demand in
+    the first moments, before anything is moving, may simply be worse than
+    the same demand mid-motion. Not enough data to build a rule on.
+
 Usage:
     python pick_window.py recordings/dataset_2.csv
 """
