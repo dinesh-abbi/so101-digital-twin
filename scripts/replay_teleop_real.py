@@ -606,6 +606,7 @@ def main():
         roll_prev = (here["wrist_roll"] if not args.dry_run else None)
         abort_reason = None
         prev_measured = {}
+        bus_dropped = False
 
         for t, pose in frames:
             if viewer is not None and not viewer.is_running():
@@ -619,9 +620,17 @@ def main():
                 # actively holding.
                 action = {f"{j}.pos": pose[j] for j in JOINT_NAMES
                           if j not in skip}
+                # Hold each skipped joint where it was LAST SEEN, from the
+                # observation this loop already takes -- never by reading
+                # the bus again here. An extra get_observation() per
+                # skipped joint per tick doubles bus traffic (120 round
+                # trips a second instead of 60) on a bus that has already
+                # dropped mid-replay more than once. Falls back to the
+                # start-pose reading on the first tick, before any
+                # measurement exists.
                 for _sj in skip:
                     action[f"{_sj}.pos"] = float(
-                        follower.get_observation()[f"{_sj}.pos"])
+                        prev_measured.get(_sj, here[_sj]))
                 action["gripper.pos"] = min(GRIPPER_MAX, action["gripper.pos"])
                 follower.send_action(action)
                 obs = follower.get_observation()
@@ -723,12 +732,38 @@ def main():
 
     except KeyboardInterrupt:
         print("\n\n  Interrupted.")
+    except ConnectionError as exc:
+        # The motor bus went silent mid-replay. Seen several times on this
+        # bench: all 6 IDs stop answering at once, which is what a marginal
+        # connection in the daisy chain looks like rather than one motor
+        # failing. Report it plainly instead of two stacked tracebacks --
+        # the second one comes from disconnect() then failing to turn
+        # torque off over the same dead bus.
+        print("\n\n" + "=" * 70)
+        print("  MOTOR BUS DROPPED")
+        print("=" * 70)
+        print(f"  {exc}")
+        print("\n  All six motor IDs stopped answering at once, so this is "
+              "the shared bus,\n  not a single motor. Torque could not be "
+              "turned off.")
+        print("\n  POWER OFF the follower and support the arm. Then reseat "
+              "the servo\n  cables -- wrist_roll and gripper especially, "
+              "they are the far end of\n  the chain, so a break there kills "
+              "everything downstream -- and run\n  follower_raw_probe.py "
+              "before driving it again.")
     finally:
         if viewer is not None:
             viewer.close()
         if follower is not None:
-            follower.disconnect()
-            print("  Disconnected. THE FOLLOWER IS LIMP - SUPPORT IT.")
+            try:
+                follower.disconnect()
+                print("  Disconnected. THE FOLLOWER IS LIMP - SUPPORT IT.")
+            except ConnectionError:
+                # Expected when the bus is already dead: disable_torque()
+                # cannot reach the motors either. The message above already
+                # says to cut power.
+                print("  Could not disconnect cleanly -- the bus is down. "
+                      "POWER OFF the follower.")
         else:
             print("\n  Done (no hardware was touched).")
 
