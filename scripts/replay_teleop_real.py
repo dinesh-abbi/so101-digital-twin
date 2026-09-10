@@ -128,13 +128,30 @@ DIVERGENCE_LIMIT = 45.0
 # than a lunge.
 START_TOLERANCE = 5.0
 
-# The largest gap the default approach will close on its own. Beyond this
-# the arm is not "nudged into position", it is unfolded across most of its
-# range before the replay starts -- 140 units on one measured window, with
-# shoulder_lift and elbow_flex swinging the arm up and out together. Safe
-# in the rate-limited sense and still alarming to stand next to, so it
-# needs --force-approach said out loud.
-MAX_AUTO_APPROACH = 60.0
+# The largest approach the default will close on its own, measured as a
+# LOAD-WEIGHTED gap rather than a raw one.
+#
+# What this is guarding against is the arm unfolding across most of its
+# range before the replay starts -- measured 140 units with shoulder_lift
+# (-99 -> +36) and elbow_flex (+100 -> -40) swinging it up and out
+# together. Safe in the rate-limited sense, alarming to stand next to.
+#
+# A raw threshold gets that wrong in both directions. Bending wrist_flex
+# alone by 65 units moves almost nothing -- it is a light joint at the end
+# of the chain -- yet a raw cap of 60 refuses it, while the same 60 units
+# on shoulder_lift swings the entire arm. So each joint's gap is scaled by
+# what it actually displaces before the maximum is taken; the weights are
+# the same ones pick_window.py uses to choose speed, from this arm's own
+# holding currents.
+MAX_AUTO_APPROACH = 90.0
+APPROACH_WEIGHT = {
+    "shoulder_lift": 2.4,   # carries the whole arm
+    "elbow_flex": 1.4,      # carries the forearm and gripper
+    "shoulder_pan": 1.0,
+    "wrist_flex": 0.8,
+    "wrist_roll": 0.5,
+    "gripper": 0.5,
+}
 
 WIRE_RADIUS = 0.004
 WIRE_RGBA = (0.05, 0.05, 0.05, 1.0)
