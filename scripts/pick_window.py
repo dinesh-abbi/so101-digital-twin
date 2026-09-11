@@ -63,6 +63,7 @@ import mujoco                                    # noqa: E402
 
 from real_sim_joint_mapping import (             # noqa: E402
     JOINT_NAMES,
+    read_mapping_note,
     sim_joint_ranges_from_model,
     sim_to_real_vector,
     widen_shoulder_lift,
@@ -136,13 +137,15 @@ def main():
 
     t0 = float(rows[0]["wall_time"])
     judged = [j for j in JOINT_NAMES if j not in SKIP]
+    # Invert with the offsets the recording was made with, same as replay.
+    rec_offsets, _ = read_mapping_note(path)
 
     samples = []
     for r in rows:
         t = float(r["wall_time"]) - t0
         rad = {j: math.radians(float(r[f"{j}_sim_qpos_deg"]))
                for j in JOINT_NAMES}
-        sim_norm = sim_to_real_vector(rad, ranges)
+        sim_norm = sim_to_real_vector(rad, ranges, rec_offsets)
         worst = max(abs(sim_norm[j] - float(r[f"{j}_real_norm"]))
                     for j in judged)
         samples.append((t, worst, sim_norm))

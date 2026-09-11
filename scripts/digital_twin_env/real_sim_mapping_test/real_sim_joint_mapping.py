@@ -38,6 +38,10 @@ validate_real_sim_mapping.py, which tests it against this project's own
 2026-08-22 real calibration data (Windows laptop, SO-ARM101 follower).
 """
 
+import json
+import math
+from pathlib import Path
+
 import mujoco
 import numpy as np
 
@@ -55,6 +59,76 @@ JOINT_NAMES = [
 # (this project does not pass that flag); the gripper always uses
 # RANGE_0_100.
 GRIPPER_JOINT = "gripper"
+
+# ---------------------------------------------------------------------------
+# Per-joint zero offsets (2026-09-11) -- the "0% is not 0 rad" correction
+# ---------------------------------------------------------------------------
+# The module docstring warns that a linear rescale does not guarantee real
+# 0% and sim 0 rad are the same physical pose. For wrist_flex on
+# twin_follower_3 they are not: commanded to all-zeros (goto_zero_pose.py),
+# the real gripper visibly tilts UP relative to the forearm while the sim's
+# is dead level. Compared side-on against sim renders at 0/8/14/20 deg, the
+# photo matches ~14 deg (scratchpad wrist_candidates.png, 2026-09-11).
+#
+# Consistent with the 15-arm NVIDIA calibration stats: this wrist travels
+# 2121 ticks vs a 2329 +/- 17 mean (18 deg short, -12 sigma), confirmed
+# physical by a hand sweep (2078 ticks). LeRobot puts 0% at the MIDDLE of
+# that travel, so a travel that is short on one side moves the middle.
+# Recalibrating cannot fix it -- it would find the same middle.
+#
+# shoulder_lift was found the same day from table TOUCHES, not a photo:
+# recordings/teleop_touch8.csv, the gripper lowered until it just touched
+# the table at 5 spots (9.6 / 16.7 / 25.8 cm out, straight and panned 42-60
+# deg). With the wrist offset alone the sim jaw sat 0.9 / 1.5 / 2.8 cm BELOW
+# the table -- an error growing linearly with reach and passing through the
+# shoulder axis, i.e. the whole arm tilted down about the shoulder. Adding
+# shoulder_lift -7.5 puts all 5 within 0.1 cm (rms 0.10 cm); the best
+# elbow-only alternative leaves 0.5 cm and needs -10.5. It also makes the
+# sim forearm rise toward the wrist at the zero pose, as in the photo.
+# Consistent with the 15-arm stats: this shoulder travels 2498 ticks vs a
+# 2350 +/- 77 mean (13 deg more), so its middle sits ~6.5 deg off.
+# NOT fitted: a pair of near-base holds in teleop_after_wrist_fix.csv read
+# ~2 cm ABOVE the table; they were unlabelled and are taken to be hovers.
+# If near-base touches ever read high again, revisit.
+#
+# Units: sim degrees ADDED after the linear rescale. Negative wrist_flex in
+# the sim = gripper tip up; negative shoulder_lift = arm tilted back/up.
+# Measured for twin_follower_3 ONLY -- re-measure if the arm is changed,
+# re-horned, or recalibrated.
+#
+# RECORDINGS carry the offsets they were made with in a sidecar
+# (<csv>.mapping.json, see write_mapping_note). A CSV with no sidecar
+# predates this table and was recorded with NO offsets; replaying its sim
+# columns through today's table would shift the wrist 14 deg, so readers
+# use read_mapping_note() to get the offsets that recording actually used.
+JOINT_ZERO_OFFSET_DEG = {
+    "shoulder_lift": -7.5,
+    "wrist_flex": -14.0,
+}
+
+
+def _offset_rad(joint_name: str, offsets) -> float:
+    table = JOINT_ZERO_OFFSET_DEG if offsets is None else offsets
+    return math.radians(table.get(joint_name, 0.0))
+
+
+def mapping_note_path(csv_path) -> Path:
+    return Path(str(csv_path) + ".mapping.json")
+
+
+def write_mapping_note(csv_path) -> None:
+    """Record, next to a --record CSV, the zero offsets its sim columns used."""
+    mapping_note_path(csv_path).write_text(json.dumps(
+        {"joint_zero_offset_deg": JOINT_ZERO_OFFSET_DEG}, indent=2))
+
+
+def read_mapping_note(csv_path) -> tuple:
+    """(offsets, had_note). No sidecar = a recording made before offsets
+    existed, i.e. all zero -- NOT today's table."""
+    p = mapping_note_path(csv_path)
+    if not p.exists():
+        return {}, False
+    return json.loads(p.read_text()).get("joint_zero_offset_deg", {}), True
 
 
 def sim_joint_ranges_from_model(model) -> dict:
@@ -92,51 +166,68 @@ def load_sim_joint_ranges_rad(scene_xml_path: str) -> dict:
     return sim_joint_ranges_from_model(model)
 
 
-def real_to_sim(joint_name: str, real_normalized: float, sim_range_rad: tuple) -> float:
+def real_to_sim(joint_name: str, real_normalized: float, sim_range_rad: tuple,
+                offsets=None) -> float:
     """Convert one joint's REAL LeRobot-normalized value to a SIM radian
     target.
 
     `real_normalized` is what SO101Follower.get_observation() reports for
     this joint: -100..100 for the 5 arm joints (RANGE_M100_100), 0..100 for
     the gripper (RANGE_0_100). `sim_range_rad` is (lo, hi) from
-    load_sim_joint_ranges_rad().
+    load_sim_joint_ranges_rad(). `offsets` (joint -> sim degrees) defaults
+    to JOINT_ZERO_OFFSET_DEG; pass {} for the pre-2026-09-11 pure rescale.
+
+    With an offset the result is clamped to the sim range: a real pose the
+    model's joint limits cannot represent saturates at the limit, exactly
+    as the sim's own joint would.
     """
     lo, hi = sim_range_rad
     if joint_name == GRIPPER_JOINT:
         frac = np.clip(real_normalized, 0.0, 100.0) / 100.0
     else:
         frac = (np.clip(real_normalized, -100.0, 100.0) + 100.0) / 200.0
-    return float(lo + frac * (hi - lo))
+    return float(np.clip(lo + frac * (hi - lo) + _offset_rad(joint_name, offsets), lo, hi))
 
 
-def sim_to_real(joint_name: str, sim_rad: float, sim_range_rad: tuple) -> float:
+def sim_to_real(joint_name: str, sim_rad: float, sim_range_rad: tuple,
+                offsets=None) -> float:
     """Inverse of real_to_sim: convert a SIM radian value to the REAL
     LeRobot-normalized value that would produce it (for sending a sim-side
-    command back out to the real follower, e.g. in M7)."""
+    command back out to the real follower, e.g. in M7). The result is
+    clamped to the real normalised range, so an offset can never produce a
+    command outside the calibrated travel."""
     lo, hi = sim_range_rad
     if hi == lo:
         raise ValueError(f"Degenerate sim range for joint '{joint_name}': lo == hi")
-    frac = np.clip((sim_rad - lo) / (hi - lo), 0.0, 1.0)
+    frac = np.clip((sim_rad - _offset_rad(joint_name, offsets) - lo) / (hi - lo), 0.0, 1.0)
     if joint_name == GRIPPER_JOINT:
         return float(frac * 100.0)
     return float(frac * 200.0 - 100.0)
 
 
-def real_to_sim_vector(real_normalized_by_joint: dict, sim_ranges_rad: dict) -> np.ndarray:
+def real_to_sim_vector(real_normalized_by_joint: dict, sim_ranges_rad: dict,
+                       offsets=None) -> np.ndarray:
     """Convert a full 6-joint REAL observation dict (joint_name -> -100..100
     or 0..100) into a 6-vector of SIM radians, in JOINT_NAMES order --
     directly usable as a MuJoCo ctrl/qpos target."""
     return np.array(
-        [real_to_sim(name, real_normalized_by_joint[name], sim_ranges_rad[name]) for name in JOINT_NAMES]
+        [real_to_sim(name, real_normalized_by_joint[name], sim_ranges_rad[name], offsets)
+         for name in JOINT_NAMES]
     )
 
 
-def sim_to_real_vector(sim_rad_by_joint: dict, sim_ranges_rad: dict) -> dict:
+def sim_to_real_vector(sim_rad_by_joint: dict, sim_ranges_rad: dict,
+                       offsets=None) -> dict:
     """Inverse of real_to_sim_vector: SIM radians (dict, joint_name ->
     radians) -> REAL LeRobot-normalized dict, in the same shape
-    SO101Follower.send_action() expects."""
+    SO101Follower.send_action() expects.
+
+    When converting a RECORDING's sim columns, pass the offsets that
+    recording was made with -- read_mapping_note(csv_path)[0] -- not the
+    current table."""
     return {
-        name: sim_to_real(name, sim_rad_by_joint[name], sim_ranges_rad[name]) for name in JOINT_NAMES
+        name: sim_to_real(name, sim_rad_by_joint[name], sim_ranges_rad[name], offsets)
+        for name in JOINT_NAMES
     }
 
 

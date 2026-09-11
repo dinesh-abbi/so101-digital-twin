@@ -83,6 +83,7 @@ from real_sim_joint_mapping import (             # noqa: E402
     JOINT_NAMES,
     load_sim_joint_ranges_rad,
     real_to_sim_vector,
+    write_mapping_note,
 )
 
 # The scene that resolves meshdir correctly. so101.xml alone cannot find its
@@ -322,6 +323,7 @@ def main():
             for j in live:
                 header += [f"{j}_target", f"{j}_real", f"{j}_sim_deg"]
             record_writer.writerow(header)
+            write_mapping_note(record_path)     # offsets behind *_sim_deg
             print(f"  --record: logging to {record_path}")
 
         with mujoco.viewer.launch_passive(model, data) as viewer:

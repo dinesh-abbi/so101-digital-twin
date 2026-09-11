@@ -50,6 +50,7 @@ from real_sim_joint_mapping import (             # noqa: E402
     real_to_sim_vector,
     sim_joint_ranges_from_model,
     widen_shoulder_lift,
+    write_mapping_note,
 )
 
 # Same scene M7 uses -- the one whose meshdir actually resolves regardless
@@ -163,6 +164,7 @@ def main():
                        f"{j}_real_sim_deg", f"{j}_sim_ctrl_deg",
                        f"{j}_sim_qpos_deg"]
         record_writer.writerow(header)
+        write_mapping_note(args.record)     # replay must know the offsets used
         print(f"  --record: logging to {args.record}")
 
     period = 1.0 / args.fps

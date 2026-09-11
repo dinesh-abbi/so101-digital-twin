@@ -101,6 +101,7 @@ from real_sim_joint_mapping import (             # noqa: E402
     real_to_sim_vector,
     sim_joint_ranges_from_model,
     widen_shoulder_lift,
+    write_mapping_note,
 )
 
 # Corner-placed scene (base sits at the near long edge's midpoint, facing
@@ -308,6 +309,17 @@ def parse_args():
                          "to settle against and nothing stops it wrapping. "
                          "Freezing it lets the other five joints do useful "
                          "work while that is unresolved.")
+    ap.add_argument("--limp", default="", metavar="JOINTS",
+                    help="Comma-separated joints to switch TORQUE OFF and "
+                         "never command, e.g. --limp wrist_roll. Still read, "
+                         "logged and mirrored in sim.\n"
+                         "WHY THIS EXISTS (2026-09-11): --freeze was not "
+                         "enough. Frozen at +1.83, wrist_roll still turned "
+                         "~270 deg on its own and tripped the travel cap -- "
+                         "it drives AWAY from its goal (last Goal_Position "
+                         "was behind it) while its EEPROM is identical to "
+                         "the healthy joints. The fault is in the powered "
+                         "servo, so the only safe hold is no power at all.")
     return ap.parse_args()
 
 
@@ -475,6 +487,7 @@ def main():
                            f"{j}_real_sim_deg", f"{j}_sim_ctrl_deg",
                            f"{j}_sim_qpos_deg"]
             record_writer.writerow(header)
+            write_mapping_note(args.record)     # replay must know the offsets used
             print(f"  --record: logging to {args.record}")
 
         print("\n  Move the LEADER arm. Ctrl+C (or close the viewer) to quit.")
@@ -515,6 +528,21 @@ def main():
             print("\n  FROZEN (held, not following the leader):")
             for j in frozen:
                 print(f"    {j:<14} held at {frozen_at[j]:+7.2f}")
+
+        # ---- Limp joints: torque OFF, never commanded. See --limp.
+        limp = [j.strip() for j in args.limp.split(",") if j.strip()]
+        bad_limp = [j for j in limp if j not in JOINT_NAMES]
+        if bad_limp:
+            raise SystemExit(
+                f"--limp: unknown joint(s) {', '.join(bad_limp)}.\n"
+                f"  Valid: {', '.join(JOINT_NAMES)}")
+        if set(limp) & set(frozen):
+            raise SystemExit("--limp and --freeze cannot name the same joint.")
+        if limp:
+            follower.bus.disable_torque(limp)
+            print("\n  LIMP (torque off, not commanded -- support by hand if needed):")
+            for j in limp:
+                print(f"    {j}")
         while True:
             loop_start = time.perf_counter()
 
@@ -526,6 +554,12 @@ def main():
             raw_action = leader.get_action()
             teleop_action = teleop_action_processor((raw_action, obs))
             robot_action_to_send = robot_action_processor((teleop_action, obs))
+            # The default processors pass the SAME dict through, so editing
+            # robot_action_to_send below (freeze, limp, gripper clamp) would
+            # also rewrite raw_action -- which the recorder logs as the
+            # leader's command. Copy first so the log shows what the leader
+            # actually did (a --limp joint was logging as nan).
+            robot_action_to_send = dict(robot_action_to_send)
 
             # ---- The one guard kept from this project's own findings.
             # The real jaw hits a hard mechanical stop at ~68 normalised
@@ -546,6 +580,12 @@ def main():
             for _fj in frozen:
                 robot_action_to_send[f"{_fj}.pos"] = frozen_at[_fj]
 
+            # ---- Limp joints: drop them from the command entirely.
+            # SOFollower.send_action only writes the joints it is given, so
+            # an unpowered joint stays unpowered and untargeted.
+            for _lj in limp:
+                robot_action_to_send.pop(f"{_lj}.pos", None)
+
             # ---- Runaway guards. See WRIST_ROLL_TRAVEL_CAP at the top
             # for the incident these exist to stop. Checked BEFORE
             # send_action, so a joint already running away is not
@@ -565,7 +605,9 @@ def main():
                 if step < 100.0:
                     roll_traveled += step
             roll_prev = roll_now
-            if roll_traveled > WRIST_ROLL_TRAVEL_CAP:
+            # An unpowered wrist_roll cannot run away; any travel is a
+            # hand turning it, so the cap would only trip falsely.
+            if roll_traveled > WRIST_ROLL_TRAVEL_CAP and "wrist_roll" not in limp:
                 abort_reason = (
                     f"wrist_roll has travelled {roll_traveled:.0f} units "
                     f"(cap {WRIST_ROLL_TRAVEL_CAP:.0f}).\n"

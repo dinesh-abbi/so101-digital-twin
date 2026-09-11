@@ -65,6 +65,7 @@ import mujoco.viewer                             # noqa: E402
 
 from real_sim_joint_mapping import (             # noqa: E402
     JOINT_NAMES,
+    read_mapping_note,
     real_to_sim_vector,
     sim_joint_ranges_from_model,
     sim_to_real_vector,
@@ -197,8 +198,11 @@ def _add_wire_geoms(spec):
         )
 
 
-def load_frames(path, source="real", sim_ranges=None):
+def load_frames(path, source="real", sim_ranges=None, offsets=None):
     """Read a --record CSV into (t, {joint: normalised}) frames.
+
+    `offsets` must be the zero offsets the recording was MADE with
+    (read_mapping_note), not today's table -- see real_sim_joint_mapping.
 
     source="real" replays the *_real_norm column -- the arm's own past
     positions. That proves the servos repeat a trajectory, which is useful
@@ -234,7 +238,7 @@ def load_frames(path, source="real", sim_ranges=None):
         if source == "sim":
             rad = {j: math.radians(float(r[f"{j}_sim_qpos_deg"]))
                    for j in JOINT_NAMES}
-            pose = sim_to_real_vector(rad, sim_ranges)
+            pose = sim_to_real_vector(rad, sim_ranges, offsets)
         else:
             pose = {j: float(r[f"{j}_real_norm"]) for j in JOINT_NAMES}
         frames.append((t, pose))
@@ -376,7 +380,12 @@ def main():
         widen_shoulder_lift(_spec)
         _ranges_for_load = sim_joint_ranges_from_model(_spec.compile())
 
-    frames = load_frames(args.csv_path, args.source, _ranges_for_load)
+    # The sim columns were written through whatever zero offsets were in
+    # force at RECORDING time; invert with those, or a pre-2026-09-11
+    # recording would be replayed with the wrist shifted 14 deg.
+    rec_offsets, had_note = read_mapping_note(args.csv_path)
+
+    frames = load_frames(args.csv_path, args.source, _ranges_for_load, rec_offsets)
     full_duration = frames[-1][0]
     frames = window_frames(frames, args.window)
     duration = frames[-1][0]
@@ -400,6 +409,10 @@ def main():
     print(f"  clamp    : {clamp if clamp is not None else 'DISABLED'}")
     if skip:
         print(f"  skipping : {', '.join(skip)}  (never commanded)")
+    if args.source == "sim":
+        print(f"  offsets  : {rec_offsets or 'none'}  "
+              + ("(from the recording's .mapping.json)" if had_note else
+                 "(no .mapping.json -- recorded before zero offsets existed)"))
 
     # ---- Sim-vs-real divergence, before anything is energised. This is
     # the number --source sim exists to expose: how far MuJoCo's idea of
@@ -415,7 +428,7 @@ def main():
                 continue
             _rad = {j: math.radians(float(_r[f"{j}_sim_qpos_deg"]))
                     for j in JOINT_NAMES}
-            _simnorm = sim_to_real_vector(_rad, _ranges_for_load)
+            _simnorm = sim_to_real_vector(_rad, _ranges_for_load, rec_offsets)
             for j in JOINT_NAMES:
                 _diffs[j].append(abs(_simnorm[j]
                                      - float(_r[f"{j}_real_norm"])))
@@ -507,6 +520,15 @@ def main():
             print("\n  Connecting to follower...")
             follower.connect()
             print("  Connected.")
+            # Skipped joints go LIMP: torque off, never commanded. Until
+            # 2026-09-11 they were commanded to hold where last seen, but
+            # that day wrist_roll, held at a constant target, drove itself
+            # ~270 deg away (m_lerobot_teleop_sim --freeze) -- the fault is
+            # in the powered servo, so "hold" is exactly what must not
+            # happen. Same rule as that script's --limp.
+            if skip:
+                follower.bus.disable_torque(skip)
+                print(f"  Limp (torque off): {', '.join(skip)}")
 
             # ---- Start-pose gate -------------------------------------
             obs = follower.get_observation()
@@ -592,8 +614,7 @@ def main():
                     cmd = {}
                     for j in JOINT_NAMES:
                         if j in skip:
-                            cmd[f"{j}.pos"] = cur[j]
-                            continue
+                            continue        # limp: never commanded
                         # Advance the ramp at a rate this joint can manage:
                         # a single rate for all six asks the loaded ones to
                         # lower the arm as fast as an unloaded wrist.
@@ -664,23 +685,11 @@ def main():
                 break
 
             if follower is not None:
-                # Skipped joints are commanded to hold where they are, not
-                # omitted -- LeRobot sends the whole action dict, and a
-                # missing joint would simply keep its last goal rather than
-                # actively holding.
+                # Skipped joints are omitted: they are limp (torque off, see
+                # connect above) and SOFollower.send_action only writes the
+                # joints it is given.
                 action = {f"{j}.pos": pose[j] for j in JOINT_NAMES
                           if j not in skip}
-                # Hold each skipped joint where it was LAST SEEN, from the
-                # observation this loop already takes -- never by reading
-                # the bus again here. An extra get_observation() per
-                # skipped joint per tick doubles bus traffic (120 round
-                # trips a second instead of 60) on a bus that has already
-                # dropped mid-replay more than once. Falls back to the
-                # start-pose reading on the first tick, before any
-                # measurement exists.
-                for _sj in skip:
-                    action[f"{_sj}.pos"] = float(
-                        prev_measured.get(_sj, here[_sj]))
                 action["gripper.pos"] = min(GRIPPER_MAX, action["gripper.pos"])
                 follower.send_action(action)
                 obs = follower.get_observation()
@@ -695,7 +704,9 @@ def main():
                 roll_now = measured["wrist_roll"]
                 roll_traveled += abs(roll_now - roll_prev)
                 roll_prev = roll_now
-                if roll_traveled > WRIST_ROLL_TRAVEL_CAP:
+                # A limp (skipped) wrist_roll cannot run away; any travel
+                # is a hand turning it.
+                if roll_traveled > WRIST_ROLL_TRAVEL_CAP and "wrist_roll" not in skip:
                     abort_reason = (
                         f"wrist_roll travelled {roll_traveled:.0f} units "
                         f"(cap {WRIST_ROLL_TRAVEL_CAP:.0f}) by t={t:.1f}s.\n"
