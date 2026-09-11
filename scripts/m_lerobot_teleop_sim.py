@@ -169,7 +169,28 @@ GRIPPER_MAX = 65.0
 # had the travel cap since f03e77a and replay_teleop_real.py got both today;
 # this script had neither, which is why nothing stopped it.
 WRIST_ROLL_TRAVEL_CAP = 150.0
-DIVERGENCE_LIMIT = 25.0
+
+# ---- Divergence: judge the gap's TREND, not its size ----------------------
+# The 25.0 absolute limit this replaces would abort ordinary teleop. Every
+# recording on this bench that contains a real follower shows the gap
+# between leader command and follower position reaching far past it while
+# the arm tracks perfectly well -- 34.5 on shoulder_lift in
+# teleop_log_60fps, 51.1 on wrist_flex in teleop_log_pick3, 122.3 on
+# shoulder_lift in teleop_log_v9.
+#
+# That gap is LeRobot's clamp working as designed, not a fault: every
+# command is capped to present_pos +/- max_relative_target and re-anchored
+# to the arm's actual position each tick, so a fast leader motion opens a
+# gap no matter how healthy the servo is.
+#
+# What actually separates a fault: wait for the command to go nearly still,
+# then watch the gap's direction. Across 14 measured cases, every healthy
+# joint CLOSES the gap (-11 to -78 units) and only a genuine runaway GROWS
+# it (teleop_pick_v1 wrist_roll, 0.0 -> 47.7). See replay_teleop_real.py's
+# matching comment for the full table.
+DIVERGENCE_STILL = 0.05     # units/tick: the command counts as stationary
+DIVERGENCE_HOLD = 20        # ticks it must be still before the gap is judged
+DIVERGENCE_GROWTH = 5.0     # units the gap may grow over that window
 
 # How many consecutive ticks a self-collision state must hold before it is
 # reported. At a marginal fold MuJoCo gains and loses contact on
@@ -471,6 +492,11 @@ def main():
         roll_traveled = 0.0
         roll_prev = None
         abort_reason = None
+        # Per-joint runaway state: how long the leader has held this joint
+        # still, and what the gap was when it went still.
+        still_ticks = {j: 0 for j in JOINT_NAMES}
+        gap_at_still = {j: 0.0 for j in JOINT_NAMES}
+        prev_cmd = {}
 
         # ---- Frozen joints. Latch where each one is RIGHT NOW and keep
         # commanding exactly that, so it is actively held rather than left
@@ -557,19 +583,41 @@ def main():
                     # target, not the leader, and a frozen joint that drifts
                     # is caught by the travel cap above.
                     continue
-                _gap = abs(float(obs[f"{_j}.pos"]) - float(_cmd))
+                _cmd = float(_cmd)
+                _gap = abs(float(obs[f"{_j}.pos"]) - _cmd)
                 # wrist_roll's wrap makes a legitimate reading look 200
                 # units off; anything at/over that is the wrap, not drift.
                 if _j == "wrist_roll" and _gap > 150.0:
                     _gap = abs(_gap - 200.0)
-                if _gap > DIVERGENCE_LIMIT:
-                    abort_reason = (
-                        f"{_j} is {_gap:.1f} units from its command "
-                        f"(commanded {float(_cmd):+.1f}, measured "
-                        f"{float(obs[f'{_j}.pos']):+.1f}, limit "
-                        f"{DIVERGENCE_LIMIT:.0f}).\n"
-                        "  The joint is not following the leader.")
-                    break
+
+                # Only judge a joint once the LEADER has held it still long
+                # enough for the follower to arrive -- see the DIVERGENCE_*
+                # comment at the top. While the leader is moving, the gap
+                # is the clamp doing its job and says nothing about health.
+                _prev = prev_cmd.get(_j)
+                if _prev is None or abs(_cmd - _prev) >= DIVERGENCE_STILL:
+                    still_ticks[_j] = 0
+                    gap_at_still[_j] = _gap
+                else:
+                    still_ticks[_j] += 1
+                    if still_ticks[_j] >= DIVERGENCE_HOLD:
+                        _growth = _gap - gap_at_still[_j]
+                        if _growth > DIVERGENCE_GROWTH:
+                            abort_reason = (
+                                f"{_j} is RUNNING AWAY.\n"
+                                f"  The leader has held it still for "
+                                f"{still_ticks[_j]} ticks, but the gap GREW "
+                                f"from {gap_at_still[_j]:.1f} to "
+                                f"{_gap:.1f} units\n"
+                                f"  (commanded {_cmd:+.1f}, measured "
+                                f"{float(obs[f'{_j}.pos']):+.1f}).\n\n"
+                                "  A joint that drifts further from a "
+                                "stationary command is not under\n  "
+                                "control.")
+                            break
+            prev_cmd = {j: float(robot_action_to_send[f"{j}.pos"])
+                        for j in JOINT_NAMES
+                        if f"{j}.pos" in robot_action_to_send}
             if abort_reason:
                 break
 

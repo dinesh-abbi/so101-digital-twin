@@ -104,23 +104,43 @@ GRIPPER_MAX = 65.0
 # Every other joint hits a mechanical limit long before it can run away.
 WRIST_ROLL_TRAVEL_CAP = 120.0
 
-# How far a joint's MEASURED position may sit from what it was commanded
-# before the replay aborts.
+# ---- Divergence: judge the gap's TREND, not its size ----------------------
+# A raw threshold cannot work here, and 2026-09-10 was spent discovering
+# that the hard way (25 -> 45, then --speed 0.25 to keep runs under it).
 #
-# Raised 25 -> 45 on 2026-09-10 after a --source sim replay aborted on
-# elbow_flex at t=6.3 s: commanded +26.6, measured +51.8. That was the guard
-# being wrong, not the arm. The joint was BEHIND its target, not running
-# past it, and the trajectory itself is gentle -- the sim commands
-# elbow_flex at most 0.84 units/tick against a 4.0 clamp. It was simply
-# lagging while lowering from +65 to +17 against gravity over two seconds.
+# WHY. LeRobot's ensure_safe_goal_position caps every command to
+# present_pos +/- max_relative_target, re-anchored to the arm's ACTUAL
+# position each tick. So the follower can never get ahead of its goal, but
+# the trajectory can run arbitrarily far ahead of the follower whenever it
+# moves faster than the clamp allows. The resulting gap measures how fast
+# the trajectory is moving -- not whether anything is wrong.
 #
-# 25 was calibrated for --source real, where the arm replays its own past
-# positions and therefore tracks closely. A sim-sourced replay asks for a
-# trajectory the hardware never actually performed, so a heavily loaded
-# joint falls further behind legitimately. 45 still catches a runaway (the
-# wrist_roll incident hit 100+ within a second) while leaving room for a
-# joint that is following, just slowly.
-DIVERGENCE_LIMIT = 45.0
+# Measured across every recording on this bench that contains a real
+# follower, during ordinary human-driven teleop with the arm visibly
+# tracking fine (wrist_roll excluded, it has its own fault):
+#
+#     teleop_log_60fps   shoulder_lift   34.5
+#     teleop_log_pick3   wrist_flex      51.1
+#     teleop_log_v10     wrist_flex      83.8
+#     teleop_log_v9      shoulder_lift  122.3
+#
+# Healthy operation reaches 122 units. Any fixed limit below that aborts
+# good runs; any limit above it is too loose to catch a real fault.
+#
+# WHAT ACTUALLY SEPARATES THEM. Wait until the COMMAND is nearly still --
+# so the arm has had time to arrive -- then watch which way the gap moves:
+#
+#     catching up   command stops, gap SHRINKS   13 of 13 healthy cases,
+#                                                trends -11 to -78
+#     runaway       command stops, gap GROWS     teleop_pick_v1 wrist_roll,
+#                                                0.0 -> 47.7 (+47.7)
+#
+# No overlap. The sign of the trend is the discriminator, and it needs no
+# magnitude threshold at all -- which is why teleop_log_v9's wrist_roll,
+# 91.8 units out but closing at -25.3, is correctly NOT flagged.
+DIVERGENCE_STILL = 0.05     # units/tick: the command counts as stationary
+DIVERGENCE_HOLD = 20        # ticks it must be still before the gap is judged
+DIVERGENCE_GROWTH = 5.0     # units the gap may grow over that window
 
 # How far each joint may sit from the CSV's first pose before this refuses
 # to start. 5 units is roughly the distance the clamp covers in ~1.5 ticks,
@@ -632,6 +652,11 @@ def main():
         abort_reason = None
         prev_measured = {}
         bus_dropped = False
+        # Per-joint runaway state: how long this joint's command has been
+        # stationary, and what the gap was when it went still.
+        still_ticks = {j: 0 for j in JOINT_NAMES}
+        gap_at_still = {j: 0.0 for j in JOINT_NAMES}
+        prev_action = {}
 
         for t, pose in frames:
             if viewer is not None and not viewer.is_running():
@@ -681,38 +706,49 @@ def main():
                         "and can take the whole bus down with it.")
                     break
 
-                # GUARD 2: measured vs commanded divergence. The clamp keeps
-                # every step under max_relative_target, so a healthy joint
-                # stays within a few units of its command. A big gap means
-                # the joint is not tracking -- jammed, unpowered, or running
-                # open-loop -- and continuing to send only makes it worse.
+                # GUARD 2: is a joint RUNNING AWAY, or just behind?
+                #
+                # A gap alone says nothing -- see the DIVERGENCE_* comment
+                # at the top. Only judge a joint once its command has been
+                # nearly still long enough for the arm to arrive, then ask
+                # which way the gap is moving. Shrinking means catching up;
+                # growing means the joint is not under control.
                 for j in JOINT_NAMES:
                     if j in skip:
                         continue
-                    gap = abs(measured[j] - action[f"{j}.pos"])
-                    if gap > DIVERGENCE_LIMIT:
-                        # Is it closing the gap or opening it? Lagging and
-                        # running away look identical in a single sample but
-                        # need opposite fixes, so compare against the last
-                        # measurement.
-                        was = prev_measured.get(j)
-                        closing = (was is not None
-                                   and abs(measured[j] - action[f"{j}.pos"])
-                                   < abs(was - action[f"{j}.pos"]))
-                        kind = ("LAGGING -- it IS following, just too slowly "
-                                "(the gap is closing).\n  Raise "
-                                "--max-relative-target, lower --fps, or "
-                                "accept a larger\n  DIVERGENCE_LIMIT."
-                                if closing else
-                                "NOT FOLLOWING -- the gap is not closing. "
-                                "Check the joint before retrying.")
+                    cmd = action[f"{j}.pos"]
+                    prev_cmd = prev_action.get(j)
+                    gap = abs(measured[j] - cmd)
+
+                    moving = (prev_cmd is None
+                              or abs(cmd - prev_cmd) >= DIVERGENCE_STILL)
+                    if moving:
+                        # Command is driving the joint; the gap is the
+                        # clamp doing its job. Reset the window.
+                        still_ticks[j] = 0
+                        gap_at_still[j] = gap
+                        continue
+
+                    still_ticks[j] += 1
+                    if still_ticks[j] < DIVERGENCE_HOLD:
+                        continue
+
+                    growth = gap - gap_at_still[j]
+                    if growth > DIVERGENCE_GROWTH:
                         abort_reason = (
-                            f"{j} is {gap:.1f} units from its command at "
-                            f"t={t:.1f}s\n  (commanded {action[f'{j}.pos']:+.1f}, "
-                            f"measured {measured[j]:+.1f}, limit "
-                            f"{DIVERGENCE_LIMIT:.0f}).\n"
-                            f"  {kind}")
+                            f"{j} is RUNNING AWAY at t={t:.1f}s.\n"
+                            f"  Its command has been still for "
+                            f"{still_ticks[j]} ticks, but the gap GREW from "
+                            f"{gap_at_still[j]:.1f} to {gap:.1f} units\n"
+                            f"  (commanded {cmd:+.1f}, measured "
+                            f"{measured[j]:+.1f}).\n\n"
+                            "  A joint that drifts further from a "
+                            "stationary command is not under\n  control. "
+                            "Power off the follower and check that joint "
+                            "before retrying.")
                         break
+                prev_action = {j: action[f"{j}.pos"] for j in JOINT_NAMES
+                               if f"{j}.pos" in action}
                 prev_measured = dict(measured)
                 if abort_reason:
                     break
