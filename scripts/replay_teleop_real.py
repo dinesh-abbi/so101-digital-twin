@@ -46,6 +46,7 @@ Usage
 
 import argparse
 import csv
+import json
 import logging
 import math
 import sys
@@ -59,6 +60,7 @@ logging.getLogger().setLevel(logging.ERROR)
 
 _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE / "digital_twin_env" / "real_sim_mapping_test"))
+sys.path.insert(0, str(_HERE / "digital_twin_env" / "cube_mark_test"))
 
 import mujoco                                    # noqa: E402
 import mujoco.viewer                             # noqa: E402
@@ -71,6 +73,7 @@ from real_sim_joint_mapping import (             # noqa: E402
     sim_to_real_vector,
     widen_shoulder_lift,
 )
+from cube_mark import MarkedCube, add_cube      # noqa: E402
 
 SCENE_PATH = (_HERE / "digital_twin_env" / "robot_corner_test"
               / "robot_corner_scene.xml")
@@ -245,6 +248,44 @@ def load_frames(path, source="real", sim_ranges=None, offsets=None):
     return frames
 
 
+def load_cube_frames(path):
+    """Read a --cube recording's per-tick cube_x/y/z/held columns, in the
+    SAME row order and using the SAME t0 as load_frames -- so index i here
+    lines up with frames[i] whenever both are windowed identically.
+
+    Returns None if the CSV has no cube columns (an ordinary recording, or
+    one made without --cube) -- callers must treat that as "no cube",
+    never as an error; this must never affect a plain replay.
+
+    Kinematic playback only: this writes exactly the recorded (x, y, z)
+    each tick, the same trust boundary MarkedCube itself uses for a
+    position it already computed -- no re-detection, no physics-decided
+    grasp. Orientation is not recorded per tick (only at mark time), so
+    the cube is shown at a fixed yaw throughout, read from the sidecar.
+    """
+    with open(path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows or "cube_x" not in rows[0]:
+        return None
+    t0 = float(rows[0]["wall_time"])
+    return [(float(r["wall_time"]) - t0, float(r["cube_x"]), float(r["cube_y"]),
+             float(r["cube_z"]), r["cube_held"] == "1") for r in rows]
+
+
+def window_cube_frames(cube_frames, window):
+    """Same [start, end] filter and re-basing as window_frames, kept as an
+    independent function (not a shared helper) so a change to one can
+    never silently change the other's behaviour."""
+    if cube_frames is None or window is None:
+        return cube_frames
+    lo, hi = window
+    kept = [c for c in cube_frames if lo <= c[0] <= hi]
+    if not kept:
+        return []
+    base = kept[0][0]
+    return [(t - base, x, y, z, held) for t, x, y, z, held in kept]
+
+
 def window_frames(frames, window):
     """Keep only frames inside [start, end] seconds, re-based to t=0."""
     if window is None:
@@ -390,6 +431,27 @@ def main():
     frames = window_frames(frames, args.window)
     duration = frames[-1][0]
 
+    # Cube playback: entirely additive, off whenever the CSV has none or
+    # --bare is not given (the cube's floor geom only exists in that scene,
+    # matching what --cube recording already requires).
+    cube_frames = None if args.no_sim else load_cube_frames(args.csv_path)
+    if cube_frames is not None and not args.bare:
+        print(f"\n  Note: {args.csv_path} has a marked cube, but --bare was "
+              "not given -- skipping cube playback\n  (the cube needs the "
+              "bare, table-free scene). Add --bare to see it.")
+        cube_frames = None
+    cube_start = None
+    if cube_frames is not None:
+        cube_frames = window_cube_frames(cube_frames, args.window)
+        cube_sidecar = Path(str(args.csv_path) + ".cube.json")
+        if cube_sidecar.exists():
+            cube_start = json.loads(cube_sidecar.read_text()).get("mark_at_start")
+        if not cube_start and cube_frames:
+            _, _x, _y, _, _ = cube_frames[0]
+            cube_start = {"x": _x, "y": _y, "yaw_deg": 0.0}
+        print("\n  Cube: starts at the recording's mark and is carried by the "
+              "arm SHOWN in sim\n  while the recording says it was held.")
+
     print("=" * 70)
     print("  Replay recorded session -> real follower + MuJoCo mirror")
     print("=" * 70)
@@ -478,6 +540,7 @@ def main():
 
     # ---- Sim setup -----------------------------------------------------
     model = data = sim_ranges = None
+    cube = None
     sim_steps_per_frame = 1
     if not args.no_sim:
         spec = mujoco.MjSpec.from_file(
@@ -497,8 +560,14 @@ def main():
         widen_shoulder_lift(spec)
         if args.wires:
             _add_wire_geoms(spec)
+        if cube_frames is not None:
+            add_cube(spec)
         model = spec.compile()
         data = mujoco.MjData(model)
+        if cube_frames is not None:
+            cube = MarkedCube(model, data, mark_file=None)
+            if cube_start:
+                cube.place_mark(cube_start)
         # From the compiled model, not the XML -- see the live script.
         sim_ranges = sim_joint_ranges_from_model(model)
         if not args.no_corner and not args.bare:
@@ -679,7 +748,7 @@ def main():
         gap_at_still = {j: 0.0 for j in JOINT_NAMES}
         prev_action = {}
 
-        for t, pose in frames:
+        for _tick, (t, pose) in enumerate(frames):
             if viewer is not None and not viewer.is_running():
                 print("\n  Viewer closed -- stopping.")
                 break
@@ -773,6 +842,16 @@ def main():
                 data.ctrl[:6] = real_to_sim_vector(measured, sim_ranges)
                 for _ in range(sim_steps_per_frame):
                     mujoco.mj_step(model, data)
+                # The cube follows the arm SHOWN here, not the positions the
+                # recording logged: a replayed real arm trails its recording,
+                # so logged positions float ahead of the jaws (31-55 mm at
+                # 0.4 s lag). See MarkedCube.follow_recording.
+                if cube is not None and _tick < len(cube_frames):
+                    _msg = cube.follow_recording(cube_frames[_tick][4],
+                                                 measured["gripper"],
+                                                 pose["gripper"])
+                    if _msg:
+                        print(f"{_msg} at t={t:.1f}s", flush=True)
                 viewer.sync()
 
                 is_col = data.ncon > 0

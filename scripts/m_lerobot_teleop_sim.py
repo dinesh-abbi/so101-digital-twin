@@ -66,6 +66,11 @@ Usage
 
     # control only, no sim window (equivalent to plain lerobot-teleoperate)
     python m_lerobot_teleop_sim.py ... --no-sim
+
+    # with the cube: jaws open around the real cube, press M in this terminal
+    # to place the sim cube there; picks are mirrored from the real gripper.
+    # See digital_twin_env/cube_mark_test/cube_mark.py.
+    python m_lerobot_teleop_sim.py ... --bare --cube --record episode.csv
 """
 
 import argparse
@@ -320,11 +325,35 @@ def parse_args():
                          "was behind it) while its EEPROM is identical to "
                          "the healthy joints. The fault is in the powered "
                          "servo, so the only safe hold is no power at all.")
+    ap.add_argument("--cube", action="store_true",
+                    help="Add the 2 cm cube to the sim (needs --bare). Put the "
+                         "OPEN jaws down around the real cube and press M in "
+                         "this terminal to place the sim cube there; the mark "
+                         "is saved and reused next run. While the real gripper "
+                         "holds the cube the sim gripper carries it. Sim only "
+                         "-- nothing about the real arm's control changes.")
+    ap.add_argument("--cube-file", default=None,
+                    help="Where the cube mark is saved/loaded (default "
+                         "recordings/cube_marked.json).")
     return ap.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.cube:
+        if args.no_sim or not args.bare:
+            raise SystemExit(
+                "--cube needs the sim and --bare: the table scenes' surface "
+                "still sits 5-7 cm off the real bench, so a marked cube would "
+                "float or sink (robot_bare_scene.xml).")
+        try:
+            import msvcrt
+        except ImportError:
+            raise SystemExit("--cube reads the M key from a Windows console "
+                             "(msvcrt), which is not available here.")
+        sys.path.insert(0, str(_HERE / "digital_twin_env" / "cube_mark_test"))
+        from cube_mark import DEFAULT_MARK_FILE, MarkedCube, add_cube
 
     from lerobot.processor import make_default_processors
     from lerobot.robots.so_follower import SOFollower, SOFollowerRobotConfig
@@ -355,6 +384,7 @@ def main():
     print(f"  sim      : {'off' if args.no_sim else 'on'}")
 
     model = data = sim_ranges = None
+    cube = None
     sim_steps_per_frame = 1
     if not args.no_sim:
         # Loaded via MjSpec (not MjModel.from_xml_path) so shoulder_lift's
@@ -406,6 +436,9 @@ def main():
         if args.wires:
             _add_wire_geoms(spec)
 
+        if args.cube:
+            add_cube(spec)
+
         model = spec.compile()
         data = mujoco.MjData(model)
 
@@ -414,6 +447,9 @@ def main():
         # make the mapping target a limit the model no longer has and the
         # widening above would do nothing.
         sim_ranges = sim_joint_ranges_from_model(model)
+
+        if args.cube:
+            cube = MarkedCube(model, data, args.cube_file or DEFAULT_MARK_FILE)
 
         # Corner placement, applied post-load -- see CORNER_BASE_OFFSET
         # above. Must happen before the first mj_forward()/qpos seed below,
@@ -486,12 +522,19 @@ def main():
                 header += [f"{j}_leader_cmd", f"{j}_real_norm",
                            f"{j}_real_sim_deg", f"{j}_sim_ctrl_deg",
                            f"{j}_sim_qpos_deg"]
+            if cube is not None:
+                header += ["cube_x", "cube_y", "cube_z", "cube_held"]
+                cube.write_recording_note(args.record)
             record_writer.writerow(header)
             write_mapping_note(args.record)     # replay must know the offsets used
             print(f"  --record: logging to {args.record}")
 
         print("\n  Move the LEADER arm. Ctrl+C (or close the viewer) to quit.")
         print("  Keep a hand near the follower's power connector.\n")
+        if cube is not None:
+            print(cube.startup_message())
+            print("         (keys reach this TERMINAL only -- click it first, "
+                  "not the viewer)\n")
 
         period = 1.0 / args.fps
         tick_count = 0
@@ -677,6 +720,18 @@ def main():
                 data.ctrl[:6] = real_to_sim_vector(measured, sim_ranges)
                 for _ in range(sim_steps_per_frame):
                     mujoco.mj_step(model, data)
+
+                if cube is not None:
+                    while msvcrt.kbhit():
+                        if msvcrt.getwch().lower() == "m":
+                            print(cube.mark_here(data.ctrl[:6]), flush=True)
+                    cube_msg = cube.update(
+                        measured["gripper"],
+                        float(raw_action.get("gripper.pos", float("nan"))),
+                        data.ctrl[:6], time.perf_counter())
+                    if cube_msg:
+                        print(cube_msg, flush=True)
+
                 viewer.sync()
 
                 # Live fold-safety monitor. Self-collision is ON (see the
@@ -730,6 +785,9 @@ def main():
                                 f"{real_sim_deg:.3f}",
                                 f"{math.degrees(data.ctrl[aid]):.3f}",
                                 f"{math.degrees(data.qpos[qadr]):.3f}"]
+                    if cube is not None:
+                        cx, cy, cz, held = cube.pose()
+                        row += [f"{cx:.4f}", f"{cy:.4f}", f"{cz:.4f}", int(held)]
                     record_writer.writerow(row)
 
             # --debug-track prints real / ctrl / qpos side by side. Without
