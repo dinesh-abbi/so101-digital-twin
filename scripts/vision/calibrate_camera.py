@@ -156,23 +156,80 @@ def main():
             for i in range(len(obj_points)):
                 proj, _ = cv2.projectPoints(obj_points[i], rvecs[i], tvecs[i],
                                             K, dist)
-                errors.append(
-                    cv2.norm(img_points[i], proj, cv2.NORM_L2)
-                    / len(proj))
+                # reshape both to plain (N,2) float64 before diffing --
+                # cv2.norm is picky about matching array shape/channel
+                # layout, and newer OpenCV (5.x) returns corner points in a
+                # different shape than cv2.projectPoints' output, which
+                # crashed here (found 2026-09-16, opencv-contrib 5.0.0).
+                a = img_points[i].reshape(-1, 2).astype(np.float64)
+                b = proj.reshape(-1, 2).astype(np.float64)
+                diff = a - b
+                errors.append(float(np.sqrt(np.mean(np.sum(diff ** 2, axis=1)))))
+
+            # LOW RMS IS NOT ENOUGH, AND ON ITS OWN IT IS MISLEADING.
+            # A board that never left one patch of the frame fits that
+            # patch beautifully -- while the radial distortion terms,
+            # unconstrained everywhere else, run away to absurd values.
+            # Measured here 2026-09-16: 40 frames shot from a single spot
+            # (two orientations) gave RMS 0.087 px -- "GOOD" by the old
+            # verdict -- with k2=-60.6, k3=1920.5, which blow the
+            # distortion factor up to 238x at the image corner. Every
+            # marker seen off-centre would have been quietly wrong.
+            #
+            # So judge THREE things, not one: the fit (rms), where the
+            # data actually was (coverage), and whether the fitted model
+            # is physically sane at the frame's edge (corner factor).
+            all_pts = np.concatenate([p.reshape(-1, 2) for p in img_points])
+            span_x = float(all_pts[:, 0].ptp() / w)
+            span_y = float(all_pts[:, 1].ptp() / h)
+
+            k1, k2 = float(dist.ravel()[0]), float(dist.ravel()[1])
+            k3 = float(dist.ravel()[4]) if dist.size > 4 else 0.0
+            xn, yn = -K[0, 2] / K[0, 0], -K[1, 2] / K[1, 1]
+            r2 = float(xn * xn + yn * yn)
+            corner_factor = 1 + k1 * r2 + k2 * r2 ** 2 + k3 * r2 ** 3
 
             print(f"\n  RMS reprojection error : {rms:.4f} px")
             print(f"  worst frame            : {max(errors):.4f} px")
             print(f"  fx, fy                 : {K[0,0]:.1f}, {K[1,1]:.1f}")
             print(f"  cx, cy                 : {K[0,2]:.1f}, {K[1,2]:.1f}")
+            print(f"  frame coverage         : {span_x*100:.0f}% wide x "
+                  f"{span_y*100:.0f}% tall")
+            print(f"  distortion at corner   : {corner_factor:.2f}x "
+                  f"(sane is near 1.0)")
 
-            if rms < 0.5:
-                print("\n  GOOD -- under 0.5 px.")
-            elif rms < 1.0:
-                print("\n  Acceptable, but more varied angles would improve it.")
+            problems = []
+            if rms >= 1.0:
+                problems.append(
+                    f"RMS {rms:.2f} px is over 1 px -- a curled/flexing "
+                    "board, too few tilted views, or a wrong --square-mm.")
+            if span_x < 0.6 or span_y < 0.6:
+                problems.append(
+                    f"the board only ever covered {span_x*100:.0f}% x "
+                    f"{span_y*100:.0f}% of the frame. Distortion is "
+                    "strongest at the EDGES and corners; with no data "
+                    "there it is fitted blind. Move the board right into "
+                    "all four corners and edges, not just the middle.")
+            if not 0.5 < corner_factor < 2.0:
+                problems.append(
+                    f"the fitted distortion model is unphysical: it "
+                    f"scales by {corner_factor:.1f}x at the image corner. "
+                    "This is what an under-covered frame looks like -- the "
+                    "fit is only usable near the centre.")
+
+            if problems:
+                print("\n  DO NOT TRUST THIS CALIBRATION:")
+                for p_ in problems:
+                    print(f"    - {p_}")
+                print("\n  Recapture. The board must visit the CORNERS and "
+                      "EDGES of\n  the frame, at several distances and real "
+                      "tilts -- a low RMS\n  from one spot is overfitting, "
+                      "not accuracy.")
+            elif rms < 0.5:
+                print("\n  GOOD -- low error, full frame covered, sane "
+                      "distortion.")
             else:
-                print("\n  POOR (>1 px). Likely causes: a curled/flexing board,")
-                print("  too few tilted views, or a wrong --square-mm.")
-                print("  Recapture rather than trusting this.")
+                print("\n  Acceptable, but more varied angles would improve it.")
 
             out = Path(args.out)
             out.write_text(json.dumps({
@@ -183,6 +240,13 @@ def main():
                 "frames": len(obj_points),
                 "rms_px": float(rms),
                 "worst_frame_px": float(max(errors)),
+                "coverage_x": span_x,
+                "coverage_y": span_y,
+                "corner_distortion_factor": float(corner_factor),
+                # Recorded so anything loading this file can refuse a bad
+                # calibration instead of silently returning wrong poses.
+                "trustworthy": not problems,
+                "problems": problems,
                 "camera_matrix": K.tolist(),
                 "dist_coeffs": dist.ravel().tolist(),
             }, indent=2))
