@@ -35,3 +35,9 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# Conference-room capture sources (128 MB: digital_twin.obj, real_setup.usdz).
+# Inputs to conference_table_test/build_table_parts.py and
+# extract_table_textures.py only -- the scene loads the derived parts/ and
+# textures/, which ARE committed. Copy these by hand if you need to rebuild.
+so101_assets/conference/

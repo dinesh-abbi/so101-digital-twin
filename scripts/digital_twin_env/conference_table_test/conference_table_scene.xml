@@ -1,0 +1,130 @@
+<mujoco model="conference_table_scene">
+  <!-- Scanned conference-room table, extracted from
+       so101_assets/conference/digital_twin.obj and split per-material by
+       build_table_parts.py (see that script + generate_scene_xml.py, which
+       generated this file -- do not hand-edit, regenerate instead).
+       Visual-only milestone: does the scanned table mesh load and render in
+       MuJoCo with its real per-part textures. No robot, no collision
+       geometry beyond the floor, no physics beyond gravity. -->
+
+  <compiler angle="radian" autolimits="true"/>
+
+  <option gravity="0 0 -9.81" timestep="0.002"/>
+
+  <visual>
+    <headlight diffuse="0.3 0.3 0.3" ambient="0.4 0.4 0.4" specular="0.1 0.1 0.1"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <mesh name="table_CenterStrip" file="parts/CenterStrip.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <material name="mat_CenterStrip" rgba="0.22 0.235 0.24 1" specular="0.15" shininess="0.2"/>
+    <mesh name="table_M_03229dc24d71" file="parts/M_03229dc24d71.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_03229dc24d71" type="2d" file="textures/45b788e7b83816b3.png"/>
+    <material name="mat_M_03229dc24d71" texture="tex_M_03229dc24d71" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_079f70c6abc8" file="parts/M_079f70c6abc8.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_079f70c6abc8" type="2d" file="textures/1ea1516e54714e6e.png"/>
+    <material name="mat_M_079f70c6abc8" texture="tex_M_079f70c6abc8" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_173b31eb039b" file="parts/M_173b31eb039b.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_173b31eb039b" type="2d" file="textures/4fe34dd18399dab9.png"/>
+    <material name="mat_M_173b31eb039b" texture="tex_M_173b31eb039b" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_2e184b356a3b" file="parts/M_2e184b356a3b.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_2e184b356a3b" type="2d" file="textures/5bacd6d909e0afe9.png"/>
+    <material name="mat_M_2e184b356a3b" texture="tex_M_2e184b356a3b" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_3069c2837b58" file="parts/M_3069c2837b58.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_3069c2837b58" type="2d" file="textures/b24fccf783573b4d.png"/>
+    <material name="mat_M_3069c2837b58" texture="tex_M_3069c2837b58" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_6789c69ee178" file="parts/M_6789c69ee178.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_6789c69ee178" type="2d" file="textures/3c31b7aa6fd7843f.png"/>
+    <material name="mat_M_6789c69ee178" texture="tex_M_6789c69ee178" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_73770d3a65a1" file="parts/M_73770d3a65a1.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_73770d3a65a1" type="2d" file="textures/a50031525e5adbdc.png"/>
+    <material name="mat_M_73770d3a65a1" texture="tex_M_73770d3a65a1" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_7bd62678b0fa" file="parts/M_7bd62678b0fa.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_7bd62678b0fa" type="2d" file="textures/1cff3f63b7a55e9e.png"/>
+    <material name="mat_M_7bd62678b0fa" texture="tex_M_7bd62678b0fa" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_85e05c985a4d" file="parts/M_85e05c985a4d.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_85e05c985a4d" type="2d" file="textures/960a5c58b0159e4e.png"/>
+    <material name="mat_M_85e05c985a4d" texture="tex_M_85e05c985a4d" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_8cbb3a933ae3" file="parts/M_8cbb3a933ae3.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <material name="mat_M_8cbb3a933ae3" rgba="0.8 0.8 0.8 1" specular="0.15" shininess="0.2"/>
+    <mesh name="table_M_94be5c9cf1e9" file="parts/M_94be5c9cf1e9.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_94be5c9cf1e9" type="2d" file="textures/c8eab04b3e104043.png"/>
+    <material name="mat_M_94be5c9cf1e9" texture="tex_M_94be5c9cf1e9" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_9927041748e5" file="parts/M_9927041748e5.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_9927041748e5" type="2d" file="textures/a77b6d0e9a764245.png"/>
+    <material name="mat_M_9927041748e5" texture="tex_M_9927041748e5" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_9b9871f0920e" file="parts/M_9b9871f0920e.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_9b9871f0920e" type="2d" file="textures/0cae2a61703a341e.png"/>
+    <material name="mat_M_9b9871f0920e" texture="tex_M_9b9871f0920e" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_a0496330385f" file="parts/M_a0496330385f.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_a0496330385f" type="2d" file="textures/bb08ef79b103fc4b.png"/>
+    <material name="mat_M_a0496330385f" texture="tex_M_a0496330385f" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_af0c2f61975e" file="parts/M_af0c2f61975e.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_af0c2f61975e" type="2d" file="textures/3eb0ee51fa890871.png"/>
+    <material name="mat_M_af0c2f61975e" texture="tex_M_af0c2f61975e" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_c6fbb8dfda19" file="parts/M_c6fbb8dfda19.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_c6fbb8dfda19" type="2d" file="textures/4daeb43dab2c2b57.png"/>
+    <material name="mat_M_c6fbb8dfda19" texture="tex_M_c6fbb8dfda19" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_ccc370a44f6a" file="parts/M_ccc370a44f6a.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_ccc370a44f6a" type="2d" file="textures/fbaa85bfae4efaa4.png"/>
+    <material name="mat_M_ccc370a44f6a" texture="tex_M_ccc370a44f6a" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_cf53be7b496a" file="parts/M_cf53be7b496a.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_cf53be7b496a" type="2d" file="textures/6a0af26493474497.png"/>
+    <material name="mat_M_cf53be7b496a" texture="tex_M_cf53be7b496a" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_d76e336d225c" file="parts/M_d76e336d225c.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_d76e336d225c" type="2d" file="textures/c1e5c9a03193a764.png"/>
+    <material name="mat_M_d76e336d225c" texture="tex_M_d76e336d225c" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_d7df3db2438f" file="parts/M_d7df3db2438f.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_d7df3db2438f" type="2d" file="textures/7362e9d551ae877b.png"/>
+    <material name="mat_M_d7df3db2438f" texture="tex_M_d7df3db2438f" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_dcdb5f84f30e" file="parts/M_dcdb5f84f30e.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_dcdb5f84f30e" type="2d" file="textures/620b6e6118f3f967.png"/>
+    <material name="mat_M_dcdb5f84f30e" texture="tex_M_dcdb5f84f30e" specular="0.1" shininess="0.1"/>
+    <mesh name="table_M_e17fd9b22509" file="parts/M_e17fd9b22509.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_M_e17fd9b22509" type="2d" file="textures/6bbc26ed802baf91.png"/>
+    <material name="mat_M_e17fd9b22509" texture="tex_M_e17fd9b22509" specular="0.1" shininess="0.1"/>
+    <mesh name="table_RealWalnut" file="parts/RealWalnut.obj" refquat="0.7071068 -0.7071068 0 0" inertia="shell"/>
+    <texture name="tex_RealWalnut" type="2d" file="textures/real_walnut.png"/>
+    <material name="mat_RealWalnut" texture="tex_RealWalnut" specular="0.1" shininess="0.1"/>
+
+    <material name="floor_mat" rgba="0.55 0.55 0.55 1" specular="0.05" shininess="0.0"/>
+  </asset>
+
+  <worldbody>
+    <light name="top_light" pos="0 0 3.0" dir="0 0 -1" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1" castshadow="true"/>
+
+    <camera name="table_view" pos="3.2 -3.2 2.0" xyaxes="0.707 0.707 0 -0.35 0.35 0.87"/>
+
+    <geom name="floor" type="plane" size="3 3 0.05" pos="0 0 0" material="floor_mat"
+          contype="1" conaffinity="1"/>
+
+    <!-- Body offset so the leg bottoms (mesh min Z = 0.048 m post-rotation) rest on the floor. -->
+    <body name="conference_table" pos="0 0 -0.048">
+      <geom name="geom_CenterStrip" type="mesh" mesh="table_CenterStrip" material="mat_CenterStrip" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_03229dc24d71" type="mesh" mesh="table_M_03229dc24d71" material="mat_M_03229dc24d71" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_079f70c6abc8" type="mesh" mesh="table_M_079f70c6abc8" material="mat_M_079f70c6abc8" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_173b31eb039b" type="mesh" mesh="table_M_173b31eb039b" material="mat_M_173b31eb039b" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_2e184b356a3b" type="mesh" mesh="table_M_2e184b356a3b" material="mat_M_2e184b356a3b" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_3069c2837b58" type="mesh" mesh="table_M_3069c2837b58" material="mat_M_3069c2837b58" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_6789c69ee178" type="mesh" mesh="table_M_6789c69ee178" material="mat_M_6789c69ee178" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_73770d3a65a1" type="mesh" mesh="table_M_73770d3a65a1" material="mat_M_73770d3a65a1" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_7bd62678b0fa" type="mesh" mesh="table_M_7bd62678b0fa" material="mat_M_7bd62678b0fa" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_85e05c985a4d" type="mesh" mesh="table_M_85e05c985a4d" material="mat_M_85e05c985a4d" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_8cbb3a933ae3" type="mesh" mesh="table_M_8cbb3a933ae3" material="mat_M_8cbb3a933ae3" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_94be5c9cf1e9" type="mesh" mesh="table_M_94be5c9cf1e9" material="mat_M_94be5c9cf1e9" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_9927041748e5" type="mesh" mesh="table_M_9927041748e5" material="mat_M_9927041748e5" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_9b9871f0920e" type="mesh" mesh="table_M_9b9871f0920e" material="mat_M_9b9871f0920e" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_a0496330385f" type="mesh" mesh="table_M_a0496330385f" material="mat_M_a0496330385f" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_af0c2f61975e" type="mesh" mesh="table_M_af0c2f61975e" material="mat_M_af0c2f61975e" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_c6fbb8dfda19" type="mesh" mesh="table_M_c6fbb8dfda19" material="mat_M_c6fbb8dfda19" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_ccc370a44f6a" type="mesh" mesh="table_M_ccc370a44f6a" material="mat_M_ccc370a44f6a" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_cf53be7b496a" type="mesh" mesh="table_M_cf53be7b496a" material="mat_M_cf53be7b496a" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_d76e336d225c" type="mesh" mesh="table_M_d76e336d225c" material="mat_M_d76e336d225c" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_d7df3db2438f" type="mesh" mesh="table_M_d7df3db2438f" material="mat_M_d7df3db2438f" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_dcdb5f84f30e" type="mesh" mesh="table_M_dcdb5f84f30e" material="mat_M_dcdb5f84f30e" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_M_e17fd9b22509" type="mesh" mesh="table_M_e17fd9b22509" material="mat_M_e17fd9b22509" contype="0" conaffinity="0" group="2"/>
+      <geom name="geom_RealWalnut" type="mesh" mesh="table_RealWalnut" material="mat_RealWalnut" contype="0" conaffinity="0" group="2"/>
+    </body>
+  </worldbody>
+</mujoco>

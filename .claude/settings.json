@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/Scripts/python.exe -c ' *)"
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "PowerShell($py = \"D:\\\\robotics\\\\so101-digital-twin\\\\.venv\\\\Scripts\\\\python.exe\"; & $py \"D:\\\\robotics\\\\so101-digital-twin\\\\scripts\\\\validate_scenes.py\"; Write-Host \"=== EXIT: $LASTEXITCODE ===\")"
     ]
   }
 }
